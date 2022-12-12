@@ -1,0 +1,9 @@
+[submodule "living-looper-juce"]
+	path = living-looper-juce
+	url = ./living-looper-juce
+[submodule "living-looper-sc"]
+	path = living-looper-sc
+	url = ./living-looper-sc
+[submodule "RAVE"]
+	path = RAVE
+	url = git@github.com:victor-shepardson/RAVE.git
