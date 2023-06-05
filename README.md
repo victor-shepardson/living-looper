@@ -1,5 +1,12 @@
 # Living Looper
 
+Binary release and guitar model coming soon. To use right now:
+
+- bring your own pretrained RAVE model
+- run it through `RAVE/export_looper.py` to produce a living looper `.ts` file
+- build the SuperCollider plugin in `living-looper-sc`
+- see `living-looper-sc/example/test.scd`
+
 ## NIME paper
 
 I presented this project in a talk at NIME 2023. The full paper will be published soon, and a preprint is available [here](https://iil.is/pdf/2023_nime_shepardson_magnusson_living_looper.pdf)
