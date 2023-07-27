@@ -20,7 +20,7 @@ namespace LivingLooper {
 // LLModel encapsulates the libtorch parts
 struct LLModel {
 
-    int loop_idx, oneshot;
+    int loop_idx, oneshot, auto_mode;
 
     torch::jit::Module model;
 
@@ -140,7 +140,7 @@ struct LLModel {
 
     // start the next block of processing
     void dispatch() {
-        PRINT("dispatch");
+        // PRINT("dispatch");
 
         if (compute_thread && compute_thread->joinable()) 
             PRINT("ERROR: trying to start compute_thread before previous one is finished");
@@ -152,13 +152,14 @@ struct LLModel {
 
         model_args[0] = torch::IValue(loop_idx); 
         model_args[2] = torch::IValue(oneshot); 
+        model_args[3] = torch::IValue(auto_mode); 
 
         compute_thread = std::make_unique<std::thread>(&LLModel::forward, this);
     } 
     // finish the last block of processing
     void join() {
         // join model thread
-        PRINT("join");
+        // PRINT("join");
         if (!compute_thread) 
             PRINT("ERROR: no compute thread");
         if (!compute_thread->joinable()) 
@@ -212,9 +213,10 @@ struct LLModel {
 
         c10::InferenceMode guard;
         model_args.clear();
-        model_args.push_back(torch::IValue(0));
-        model_args.push_back(torch::ones({1,1,block_size}));
-        model_args.push_back(torch::IValue(0));
+        model_args.push_back(torch::IValue(0)); //loop
+        model_args.push_back(torch::ones({1,1,block_size})); //audio
+        model_args.push_back(torch::IValue(0)); //oneshot
+        model_args.push_back(torch::IValue(0)); //auto
 
         delay = (block_size + m_processing_latency)/sr;
         res_in = std::make_unique<Resampler>(host_sr, sr, 3);
