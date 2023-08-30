@@ -1,6 +1,8 @@
 # Living Looper
 
-Binary release and guitar model coming soon. To use right now:
+See Releases page for guitar model and binary release (macOS arm64).
+
+Alternatively:
 
 - bring your own pretrained RAVE model
 - run it through `RAVE/export_looper.py` to produce a living looper `.ts` file
@@ -23,9 +25,9 @@ You can make your own `.ts` models using the RAVE fork (below) or download pre-t
 
 `living-looper-core/` - common components of C++ Living Looper plugins.
 
-`living-looper-sc/` - SuperCollider Plugin
+`living-looper-sc/` - SuperCollider Plugin with GUI
 
-`living-looper-juce/` - JUCE plugin (WIP)
+`living-looper-juce/` - JUCE plugin (WIP, not functional at present)
 
 ## License
 

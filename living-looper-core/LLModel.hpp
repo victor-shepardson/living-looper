@@ -27,7 +27,7 @@ struct LLModel {
     int host_sr, sr;
     int block_size;
     // int z_per_second;
-    int latent_size;
+    int n_latent;
     int n_loops;
     std::atomic<bool> loaded;
 
@@ -46,7 +46,9 @@ struct LLModel {
 
     torch::Tensor write_buffer;
     torch::Tensor read_buffer;
+    torch::Tensor latent_buffer;
     size_t write_idx, read_idx;
+    int latent_idx;
 
     LLModel(int host_sr) : loaded(false) {
         this->host_sr = host_sr;
@@ -62,6 +64,7 @@ struct LLModel {
 
         read_idx = 0;
         write_idx = 0;
+        latent_idx = -1;
 
         // at::init_num_threads();
         // at::set_num_threads(1);
@@ -112,7 +115,7 @@ struct LLModel {
         }
     } 
     // return a single sample of audio output
-    void read(float * buf) {
+    void read(float * buf, float * latent_buf) {
         float x[MAX_LOOPS];
         RANGE(i, n_loops) x[i] = 0;
 
@@ -134,9 +137,21 @@ struct LLModel {
         }
         // std::cout << "read from res_out" << std::endl;
         RANGE(i, n_loops) buf[i] = res_out[i].read();
+
+        // std::cout << "DIM " << latent_buffer.sizes() << std::endl;
+        if((latent_idx >= 0) && (latent_idx < latent_buffer.size(2))){
+            // std::cout << "IDX" << latent_idx << std::endl;
+            auto acc = latent_buffer.accessor<float, 3>();
+            RANGE(i, n_loops) latent_buf[i] = acc[i][0][latent_idx];
+            latent_idx++;
+        } else {
+            RANGE(i, n_loops) latent_buf[i] = 0.;
+        }
     }
     // read and write should be used together like so:
-    void step(float from, float * to){write(from); read(to);}
+    void step(float from, float * to, float * latent){
+        write(from); read(to, latent);
+    }
 
     // start the next block of processing
     void dispatch() {
@@ -168,6 +183,8 @@ struct LLModel {
         compute_thread->join();
 
         read_buffer = model_outs[0].toTensor();
+        latent_buffer = model_outs[1].toTensor();
+        latent_idx = 0;
     }
     
     void _load(const std::string& filename) {
@@ -190,18 +207,19 @@ struct LLModel {
         //   this->model = this->model.attr("model").toModule();
         // }
 
-        this->block_size = this->latent_size = this->sr = this->n_loops = -1;
+        this->block_size = this->n_latent = this->sr = this->n_loops = -1;
 
         for (auto const& attr: model.named_attributes()) {
             if (attr.name == "n_loops") {n_loops = attr.value.toInt();} 
             if (attr.name == "block_size") {block_size = attr.value.toInt();} 
             if (attr.name == "sampling_rate") {sr = attr.value.toInt();} 
+            if (attr.name == "n_latent") {n_latent = attr.value.toInt();} 
         }
         // this->z_per_second = this->sr / this->block_size;
 
         if ((block_size<=0) || 
             (n_loops<=0) || 
-            // (this->latent_size<0) || 
+            (n_latent<0) || 
             (sr<=0)){
         PRINT("model load failed");
         return;
@@ -210,6 +228,7 @@ struct LLModel {
         PRINT("\tnumber of loops: " << n_loops );
         PRINT("\tblock size: " << block_size );
         PRINT("\tsample rate: " << sr );
+        PRINT("\tlatent size: " << n_latent );
 
         c10::InferenceMode guard;
         model_args.clear();
@@ -235,7 +254,8 @@ struct LLModel {
         loaded = true;
     }
     void load(const std::string& filename) {
-        load_thread = std::make_unique<std::thread>(&LLModel::_load, this, filename);
+        load_thread = std::make_unique<std::thread>(
+            &LLModel::_load, this, filename);
     }
 
     // void forward(float* input, int loop_idx, int oneshot, float* outBuffer) {
