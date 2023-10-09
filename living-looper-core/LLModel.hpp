@@ -16,6 +16,7 @@ namespace LivingLooper {
 #define MAX_LOOPS 32
 #define SWAP(A, B) auto temp = A; A = B; B = temp;
 #define RANGE(I, N) for(int I=0; I<N; I++)
+#define PRINT(X) std::cout << X << std::endl;
 
 // LLModel encapsulates the libtorch parts
 struct LLModel {
@@ -201,11 +202,6 @@ struct LLModel {
             PRINT("error loading the model\n");
             return;
         }
-
-        // support for Neutone models
-        // if (this->model.hasattr("model")){
-        //   this->model = this->model.attr("model").toModule();
-        // }
 
         this->block_size = this->n_latent = this->sr = this->n_loops = -1;
 
