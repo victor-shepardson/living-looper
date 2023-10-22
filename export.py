@@ -22,7 +22,7 @@ class Loop(nn.Module):
             n_fit:int, # maximum dataset size to fit
             n_latent:int,
             limit_margin:Tensor
-            ):
+        ):
 
         self.index = index
         self.n_loops = n_loops
