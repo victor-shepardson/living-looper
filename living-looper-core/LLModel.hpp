@@ -156,7 +156,7 @@ struct LLModel {
 
     // start the next block of processing
     void dispatch() {
-        // PRINT("dispatch");
+        PRINT("dispatch");
 
         if (compute_thread && compute_thread->joinable()) 
             PRINT("ERROR: trying to start compute_thread before previous one is finished");
@@ -171,11 +171,12 @@ struct LLModel {
         model_args[3] = torch::IValue(auto_mode); 
 
         compute_thread = std::make_unique<std::thread>(&LLModel::forward, this);
+        // PRINT("dispatch complete");
     } 
     // finish the last block of processing
     void join() {
         // join model thread
-        // PRINT("join");
+        PRINT("join");
         if (!compute_thread) 
             PRINT("ERROR: no compute thread");
         if (!compute_thread->joinable()) 
