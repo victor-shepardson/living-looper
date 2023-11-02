@@ -61,17 +61,21 @@ class LivingLooper(nn.Module):
 
     latency_correct:int
 
+    verbose:int
+
     def __init__(self, 
             model:torch.jit.ScriptModule, 
             n_loops:int, 
             n_context:int, # time dimension of model feature
             latency_correct:int, # in latent frames
             sr:int, # sample rate
-            limit_margin:List[float] # limit latents relative to recorded min/max
+            limit_margin:List[float], # limit latents relative to recorded min/max
+            verbose:int=0
             ):
         super().__init__()
 
         self.n_loops = n_loops
+        self.verbose = verbose
 
         # self.min_loop = 2
         self.latency_correct = latency_correct
@@ -100,12 +104,14 @@ class LivingLooper(nn.Module):
         if n_fill > 0:
             limit_margin = limit_margin + [limit_margin[-1]]*n_fill
         elif n_fill < 0:
-            raise ValueError(f'{len(limit_margin)=} is greater than {self.n_latent=}')
+            raise ValueError(
+                f'{len(limit_margin)=} is greater than {self.n_latent=}')
         limit_margin_t = torch.tensor(limit_margin)
 
         # create Loops
         self.loops = nn.ModuleList(Loop(
-            i, n_loops, n_context, self.n_latent, latency_correct, limit_margin_t
+            i, n_loops, n_context, self.n_latent, latency_correct, 
+            limit_margin_t, verbose,
         ) for i in range(n_loops))
 
         self.register_buffer('mask', 
@@ -134,7 +140,7 @@ class LivingLooper(nn.Module):
             for loop in self.loops:
                 loop.feed(step, torch.zeros(self.n_latent))
 
-    def forward(self, loop_index:int, x, auto:int=0, thru:int=0):
+    def forward(self, loop_index:int, x, auto:int=0, thru:int=1):
         """
         Args:
             loop_index: loop record index
@@ -150,12 +156,15 @@ class LivingLooper(nn.Module):
         """
 
         self.step += 1
-        print(f'---step {self.step}---')
+        if self.verbose > 1:
+            print(f'---step {self.step}---')
 
         # return self.decode(self.encode(x)) ### DEBUG
 
         # always encode for cache, even if result is not used
         z = self.encode(x).squeeze()
+        print(z)
+
 
         if (loop_index!=self.prev_loop_index and loop_index < 0):
             self.reset_loop(-loop_index - 1)
@@ -204,7 +213,8 @@ class LivingLooper(nn.Module):
             ### end auto triggering
 
         if abs(i) > self.n_loops:
-            print(f'loop {i} out of range')
+            if self.verbose>0:
+                print(f'loop {i} out of range')
             i = 0
 
         # print(f'active loop {i}')
@@ -251,12 +261,18 @@ class LivingLooper(nn.Module):
 
         self.record_length += 1
 
+        # DEBUG
+        # self.zs[:] = z
+        # self.mask[:,0] = 1
+        # self.mask[:,1:] = 0
+
         y = self.decode(self.zs.permute(1,2,0)) # loops, channels (1), time
 
         fade = torch.linspace(0,1,y.shape[2])
         mask = self.mask[1,:,None,None] * fade + self.mask[0,:,None,None] * (1-fade)
         y = y * mask
         self.mask[0] = self.mask[1]
+
 
         return y, self.zs.permute(1,0,2)
 
@@ -289,7 +305,8 @@ class LivingLooper(nn.Module):
         """
         for j,loop in enumerate(self.loops): 
             if i==j:
-                print(f'RESET {i+1}')
+                if self.verbose>0:
+                    print(f'RESET {i+1}')
                 loop.reset()
         self.mask[1,i] = 0.
 
@@ -299,7 +316,8 @@ class LivingLooper(nn.Module):
         Args:
             i: zero indexed loop
         """
-        print(f'finalize {i+1}')
+        if self.verbose > 0:
+            print(f'finalize {i+1}')
         # work around quirk of torchscript
         # (can't index ModuleList except with literal)
         for j,loop in enumerate(self.loops): 
@@ -346,6 +364,7 @@ def main(
     limit_margin=[0.1, 0.5, 1],
     # included in output filename
     name="test",
+    verbose=0,
 ):
     logging.basicConfig(
         level=logging.INFO,
@@ -369,13 +388,14 @@ def main(
         context, 
         latency_correct,
         sr,
-        limit_margin
+        limit_margin,
+        verbose
         )
     looper.eval()
 
     # smoke test
     def feed(i):
-        x = (torch.rand(1, 1, looper.block_size)-0.5)*0.1
+        x = (torch.rand(1, 1, looper.block_size)-0.5)*0.01
         # x = (torch.rand(1, 1, 2**11)-0.5)*0.1
         looper(i, x)
 

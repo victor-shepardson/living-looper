@@ -63,6 +63,8 @@ class IPLS(torch.nn.Module):
         self.bz.zero_()
         self.P.zero_()
 
+        self.H.zero_()
+
         self.n.zero_()
 
     @torch.jit.export
@@ -110,21 +112,6 @@ class IPLS(torch.nn.Module):
                     cz = self.Cz[i] + y*t
                     C_i = cz / cz.pow(2).sum().sqrt()
                     self.u[i] = y.dot(C_i)
-                # wz = torch.empty_like(self.Wz[i])
-                # cz = torch.empty_like(self.Cz[i])
-                # C_i = torch.empty_like(self.Cz[i])
-                # tss_ = torch.empty_like(tss)
-                # tz = torch.empty_like(tss)
-                # t = torch.empty_like(tss)
-                # for _ in range(self.inner_steps):
-                #     wz[:] = self.Wz[i] + x*self.u[i]
-                #     tz[:] = x.dot(wz) / (wz.pow(2).sum().sqrt()+1e-7)
-                #     tss_[:] = tss + tz*tz
-                    
-                #     t[:] = tz / tss_.sqrt()
-                #     cz[:] = self.Cz[i] + y*t
-                #     C_i[:] = cz / cz.pow(2).sum().sqrt()
-                #     self.u[i] = y.dot(C_i)
 
                 self.Wz[i] = wz
                 self.t_sq_sum[i] = tss_

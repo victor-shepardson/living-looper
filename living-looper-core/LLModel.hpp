@@ -16,7 +16,7 @@ namespace LivingLooper {
 #define MAX_LOOPS 32
 #define SWAP(A, B) auto temp = A; A = B; B = temp;
 #define RANGE(I, N) for(int I=0; I<N; I++)
-#define PRINT(X) std::cout << X << std::endl;
+#define PRINT(X) ;//std::cout << X << std::endl;
 
 // LLModel encapsulates the libtorch parts
 struct LLModel {

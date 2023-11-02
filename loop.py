@@ -38,6 +38,7 @@ class FeatureStore(torch.nn.Module):
 class Loop(torch.nn.Module):
     n_loops:int
     index:int
+    verbose:int
 
     def __init__(self, 
             index:int,
@@ -45,9 +46,12 @@ class Loop(torch.nn.Module):
             n_context:int, # time dimension of model feature
             n_latent:int,
             latency_correct:int,
-            limit_margin:torch.Tensor
+            limit_margin:torch.Tensor,
+            verbose:int=0
         ):
         super().__init__()
+
+        self.verbose = verbose
 
         self.index = index
         self.n_loops = n_loops
@@ -83,11 +87,14 @@ class Loop(torch.nn.Module):
         self.model.reset()
         # self.store.reset() # this only gets reset by LivingLooper.reset
         self.rep.reset() # should this get reset?
-        self.z_min.fill_(-torch.inf)
-        self.z_max.fill_(torch.inf)
+        self.z_min.fill_(torch.inf)
+        self.z_max.fill_(-torch.inf)
 
     def partial_fit(self, x, z):
         """fit raw feature x to raw target z"""
+        self.z_min[:] = torch.minimum(self.z_min, z)
+        self.z_max[:] = torch.maximum(self.z_max, z)
+        # print('min', self.z_min, 'max', self.z_max)
         x = self.feat_xform(x)
         z = self.target_xform(z)
         self.model.partial_fit(x, z)
@@ -98,6 +105,8 @@ class Loop(torch.nn.Module):
         z = self.model.predict(x)
         z = self.target_xform.inv(z)
         z = z.clamp(self.z_min-self.limit_margin, self.z_max+self.limit_margin)
+        z[~z.isfinite()] = 0
+        # print(self.index+1, z)
         return z
 
     def finalize(self):
@@ -110,15 +119,18 @@ class Loop(torch.nn.Module):
         """
         offset = 0
         while (step+offset) in self.store.memory:
-            print('WARNING: feature already computed for loop', self.index+1, 'step', step+offset)
+            if self.verbose > 1:
+                print('WARNING: feature already computed for loop', self.index+1, 'step', step+offset)
             offset += 1
 
-        print('feed loop', self.index+1, 'offset', offset, 'step', step)
+        if self.verbose > 1:
+            print('feed loop', self.index+1, 'offset', offset, 'step', step)
         # TODO: could add logic to allow features which don't support rollback here
         # i.e. if feed returns None, don't add?
         self.store.add(step, self.rep.feed(z, offset))
 
     def get(self, step:int):
         """get the feature for time `step`"""
-        print(f'get loop', self.index+1, 'step', step)
+        if self.verbose > 1:
+            print(f'get loop', self.index+1, 'step', step)
         return self.store.get(step)
