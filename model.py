@@ -169,13 +169,14 @@ class GDKR(torch.nn.Module):
         self.register_buffer('memory', torch.empty(memory_size, n_target))
         self.register_buffer('t_memory', torch.empty(memory_size, dtype=torch.long))
         self.register_buffer('amp', torch.empty(self.n_func, n_target))
-        self.register_buffer('freq', torch.empty(self.n_func, 1))
+        # self.register_buffer('freq', torch.empty(self.n_func, 1))
+        self.register_buffer('freq', torch.empty(self.n_func, n_target))
         self.register_buffer('center_freq', 
             torch.linspace(0.01, 0.99, self.n_func)[:,None].logit())
         self.register_buffer('phase', torch.empty(self.n_func, n_target))
         self.register_buffer('bias', torch.empty(n_target))
         self.register_buffer('amp_grad', torch.empty(self.n_func, n_target))
-        self.register_buffer('freq_grad', torch.empty(self.n_func, 1))
+        self.register_buffer('freq_grad', torch.empty(self.n_func, n_target))
         self.register_buffer('phase_grad', torch.empty(self.n_func, n_target))
         # self.register_buffer('bias_grad', torch.empty(n_target))
         self.reset()
@@ -195,7 +196,8 @@ class GDKR(torch.nn.Module):
 
     def get_amp(self, amp):
         # return (amp.exp() + 1).log()
-        return amp.abs()
+        # return amp.abs()
+        return amp
         # return torch.nn.functional.relu(amp)
 
     def get_freq(self, freq):
@@ -273,7 +275,7 @@ class GDKR(torch.nn.Module):
 
             loss = (z_batch - z_).abs().sum(-1).mean()
             # amp penalty for sparsity
-            loss = loss + self.get_amp(amp).sum() * self.amp_decay
+            loss = loss + self.get_amp(amp).abs().sum() * self.amp_decay
             # TODO: harmonicity loss?
             # print(f0.shape, self.freq.shape)
 

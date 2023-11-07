@@ -67,17 +67,17 @@ class Loop(torch.nn.Module):
         self.store = FeatureStore(2*latency_correct)
 
         # for now assuming xform preserves target size
-        self.target_xform = LinQuad()
-        # self.target_xform = Id()
+        # self.target_xform = LinQuad()
+        self.target_xform = Id()
 
         # self.feat_xform = Tanh()
         self.feat_xform = Id()
 
-        # self.model = GDKR(n_feature, n_latent)
-        n_latent_ipls = 16
+        self.model = GDKR(n_feature, n_latent)
+        # n_latent_ipls = 16
         # n_latent_ipls = n_latent
-        self.model = IPLS(
-            n_feat=n_feature, n_target=n_latent, n_latent=n_latent_ipls)
+        # self.model = IPLS(
+            # n_feat=n_feature, n_target=n_latent, n_latent=n_latent_ipls)
 
         self.register_buffer('limit_margin', limit_margin)
         self.register_buffer('z_min', 
