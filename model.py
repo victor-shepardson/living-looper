@@ -1,5 +1,6 @@
 import torch
 import time
+import math
 
 class IPLS(torch.nn.Module):
     """
@@ -68,7 +69,7 @@ class IPLS(torch.nn.Module):
         self.n.zero_()
 
     @torch.jit.export
-    def partial_fit(self, x, y):
+    def partial_fit(self, _:int, x, y):
         self.n[:] = self.n + 1
         # prior expectation the means are 0
         self.mu_x[:] = (self.mu_x * self.n + x) / (self.n+1)
@@ -136,32 +137,193 @@ class IPLS(torch.nn.Module):
         self.H[:] = torch.linalg.pinv(self.P) * b @ C
 
     @torch.jit.export
-    def predict(self, x):
+    def predict(self, t:int, x):
         return (x - self.mu_x)@self.H + self.mu_y
 
 
-def fit(X, Y, n_latent=8, burn_in=2, inner_steps=2):
-    """create an IPLS model, fit to data, print timing and return the predictor"""
+class GDKR(torch.nn.Module):
+    """Gradient Descent Kernel Regression"""
+    n_func:int
+    lr_start:float
+    lr_decay:float
+    lr:float
+    amp_decay:float
+    momentum:float
+    n:int
+    batch_size:int
+    data_size:int
+    def __init__(self, 
+            n_feat:int, n_target:int, memory_size:int=4096, n_func:int=128):
+        super().__init__()
+        self.n_func = n_func
+        self.lr_start = 1.0
+        self.lr_decay = 0.977
+        self.amp_decay = 1e-2
+        # self.amp_decay = 1e-3
+        self.n = 64
+        self.batch_size = 16
+        self.momentum = 0.85
+        self.data_size = 0
+        self.lr = self.lr_start
+        # parameters: phase, frequency, amplitude of N periodic functions
+        self.register_buffer('memory', torch.empty(memory_size, n_target))
+        self.register_buffer('t_memory', torch.empty(memory_size, dtype=torch.long))
+        self.register_buffer('amp', torch.empty(self.n_func, n_target))
+        self.register_buffer('freq', torch.empty(self.n_func, 1))
+        self.register_buffer('center_freq', 
+            torch.linspace(0.01, 0.99, self.n_func)[:,None].logit())
+        self.register_buffer('phase', torch.empty(self.n_func, n_target))
+        self.register_buffer('bias', torch.empty(n_target))
+        self.register_buffer('amp_grad', torch.empty(self.n_func, n_target))
+        self.register_buffer('freq_grad', torch.empty(self.n_func, 1))
+        self.register_buffer('phase_grad', torch.empty(self.n_func, n_target))
+        # self.register_buffer('bias_grad', torch.empty(n_target))
+        self.reset()
+
+    def reset(self):
+        self.data_size = 0
+        self.lr = self.lr_start
+        self.amp_grad.zero_()
+        self.freq_grad.zero_()
+        self.phase_grad.zero_()
+        # self.bias_grad.zero_()
+        self.amp.fill_(1/self.n_func**0.5)
+        # self.freq[:] = torch.linspace(0.01, 0.99, self.n_func)[:,None].logit()
+        self.freq.zero_()
+        self.phase[:] = torch.rand_like(self.phase)
+        self.bias.zero_()
+
+    def get_amp(self, amp):
+        # return (amp.exp() + 1).log()
+        return amp.abs()
+        # return torch.nn.functional.relu(amp)
+
+    def get_freq(self, freq):
+        freq = self.center_freq + freq.tanh()*64/self.n_func
+        return freq.sigmoid()/2
+
+    def get_phase(self, phase):
+        return phase
+
+    @torch.jit.export
+    def evaluate(self, t):
+        return self._evaluate(t, self.amp, self.freq, self.phase, self.bias)
+
+    def _evaluate(self, t, amp, freq, phase, bias):
+        # t: Tensor[batch]
+        t = t[:,None,None]
+        # Tensor[batch, basis, target]
+        a = self.get_amp(amp)
+        fr = self.get_freq(freq)
+        p = self.get_phase(phase)
+        x = (((t * fr + p) * 2 * math.pi).sin() * a).sum(1) / self.n_func**0.5
+        # Tensor[batch, target]
+        return x + bias
+
+    def sample_wedge(self, n:int):
+        r = torch.rand(2,n)
+        return (r.sum(0) - 1).abs()
+
+    def predict(self, t:int, x):
+        return self.evaluate(torch.full((1,), float(t)))[0]
+
+    def finalize(self):
+        pass
+        # print(self.get_freq(self.freq))
+
+    @torch.jit.export
+    def partial_fit(self, t:int, x, z):
+    #     with torch.inference_mode(False):
+    #         self._partial_fit(t, x, z)
+
+    # def _partial_fit(self, t:int, x, z):
+        self.memory[self.data_size] = z
+        self.t_memory[self.data_size] = t
+        self.data_size += 1
+        # self.lr.mul_(self.lr_decay)
+        self.lr *= self.lr_decay
+        # print(self.lr)
+
+        self.bias[:] = (self.bias * self.data_size + z) / (self.data_size + 1)
+
+        i = self.data_size - 1
+        ts = i - (self.sample_wedge(self.n) * i).long()
+
+        # print(ts)
+
+        assert (ts < self.data_size).all()
+        assert (ts>=0).all()
+        # TODO: deal with finite memory
+
+        # print(samps)
+        batches = ts.chunk(self.n//self.batch_size)
+        for batch in batches:
+            amp = self.amp.clone().requires_grad_()
+            freq = self.freq.clone().requires_grad_()
+            phase = self.phase.clone().requires_grad_()
+            bias = self.bias#.clone().requires_grad_()
+            self.amp_grad.mul_(self.momentum)
+            self.freq_grad.mul_(self.momentum)
+            self.phase_grad.mul_(self.momentum)
+            # self.bias_grad.mul_(self.momentum)
+
+            t_batch, z_batch = self.t_memory[batch], self.memory[batch]
+            z_ = self._evaluate(t_batch, amp, freq, phase, bias)
+            # print(t.shape, x.shape, x_.shape)
+
+            loss = (z_batch - z_).abs().sum(-1).mean()
+            # amp penalty for sparsity
+            loss = loss + self.get_amp(amp).sum() * self.amp_decay
+            # TODO: harmonicity loss?
+            # print(f0.shape, self.freq.shape)
+
+            ag, pg, fg = torch.autograd.grad(
+                [loss], [amp, phase, freq],
+                )
+            # ag, pg, fg, bg = torch.autograd.grad(
+            #     [loss], [amp, phase, freq, bias],
+            #     )
+            if torch.jit.isinstance(ag, torch.Tensor):
+                self.amp_grad.add_(ag)
+                self.amp.sub_(self.amp_grad*self.lr)
+            if torch.jit.isinstance(fg, torch.Tensor):
+                self.freq_grad.add_(fg)
+                # self.freq.sub_(self.freq_grad*self.lr / 3)
+                self.freq.sub_(self.freq_grad*self.lr)
+                # print(fg.shape, fg)
+            # else:
+                # print(fg)
+            if torch.jit.isinstance(pg, torch.Tensor):
+                self.phase_grad.add_(pg)
+                self.phase.sub_(self.phase_grad*self.lr / 1)
+                self.phase.remainder_(1)
+            # if torch.jit.isinstance(bg, torch.Tensor):
+            #     self.bias_grad.add_(bg)
+            #     self.bias.sub_(self.bias_grad*self.lr)
+        
+
+def fit_model(X, Y, cls, **kw):
+    """create a model, fit to data, print timing and return the predictor"""
+    T = torch.arange(X.shape[0])
     n_feat = X.shape[-1]
     n_target = Y.shape[-1]
 
-    ipls = IPLS(n_feat, n_target, n_latent,
-        burn_in=burn_in, inner_steps=inner_steps)
+    model = cls(n_feat, n_target, **kw)
     
-    ipls = torch.jit.script(ipls)
+    model = torch.jit.script(model)
     
     ts = []
 
-    for x,y in zip(X,Y):
+    for t,x,y in zip(T,X,Y):
         t_ns = time.time_ns()
-        ipls.partial_fit(x,y)
+        model.partial_fit(t,x,y)
         ts.append(time.time_ns() - t_ns)
 
     t_ns = time.time_ns()
-    ipls.finalize()
+    model.finalize()
 
     print(f'partial_fit time (mean): {torch.mean(ts)*1e-6} ms')
     print(f'partial_fit time (99%): {torch.quantile(ts, 0.99)*1e-6} ms')
     print(f'finalize time: {(time.time_ns() - t_ns)*1e-6} ms')
     
-    return ipls.predict
+    return model

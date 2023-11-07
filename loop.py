@@ -2,7 +2,7 @@ from typing import Dict
 
 import torch
 
-from model import IPLS
+from model import IPLS, GDKR
 from representation import Window, RNN
 from transform import LinQuad, Tanh, Id
 
@@ -68,12 +68,14 @@ class Loop(torch.nn.Module):
 
         # for now assuming xform preserves target size
         self.target_xform = LinQuad()
+        # self.target_xform = Id()
 
         # self.feat_xform = Tanh()
         self.feat_xform = Id()
 
-        # n_latent_ipls = 16
-        n_latent_ipls = n_latent
+        # self.model = GDKR(n_feature, n_latent)
+        n_latent_ipls = 16
+        # n_latent_ipls = n_latent
         self.model = IPLS(
             n_feat=n_feature, n_target=n_latent, n_latent=n_latent_ipls)
 
@@ -90,22 +92,24 @@ class Loop(torch.nn.Module):
         self.z_min.fill_(torch.inf)
         self.z_max.fill_(-torch.inf)
 
-    def partial_fit(self, x, z):
+    def partial_fit(self, t:int, x, z):
         """fit raw feature x to raw target z"""
         self.z_min[:] = torch.minimum(self.z_min, z)
         self.z_max[:] = torch.maximum(self.z_max, z)
         # print('min', self.z_min, 'max', self.z_max)
         x = self.feat_xform(x)
         z = self.target_xform(z)
-        self.model.partial_fit(x, z)
+        self.model.partial_fit(t, x, z)
 
-    def predict(self, x):
+    def predict(self, t:int, x):
         """predict from raw feature x"""
         x = self.feat_xform(x)
-        z = self.model.predict(x)
+        z = self.model.predict(t, x)
         z = self.target_xform.inv(z)
         z = z.clamp(self.z_min-self.limit_margin, self.z_max+self.limit_margin)
         z[~z.isfinite()] = 0
+        if not z.isfinite().all():
+            print('WARNING: nonfinite z')
         # print(self.index+1, z)
         return z
 

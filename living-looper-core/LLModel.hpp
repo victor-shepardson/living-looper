@@ -17,6 +17,9 @@ namespace LivingLooper {
 #define SWAP(A, B) auto temp = A; A = B; B = temp;
 #define RANGE(I, N) for(int I=0; I<N; I++)
 #define PRINT(X) ;//std::cout << X << std::endl;
+#define TORCH_GUARD ;
+// #define TORCH_GUARD c10::InferenceMode guard;
+
 
 // LLModel encapsulates the libtorch parts
 struct LLModel {
@@ -73,11 +76,12 @@ struct LLModel {
 
         // unsigned int num_threads = std::thread::hardware_concurrency();
         torch::jit::getProfilingMode() = false;
-        c10::InferenceMode guard;
+        TORCH_GUARD;
         torch::jit::setGraphExecutorOptimize(true);
     }
 
     ~LLModel() {
+        TORCH_GUARD;
         if (load_thread && load_thread->joinable()) {
             load_thread->join();
         }
@@ -87,18 +91,18 @@ struct LLModel {
     }
 
     void reset() {
-        c10::InferenceMode guard;
+        TORCH_GUARD;
         model.get_method("reset")(model_args_empty);
     }
 
     void forward() {
-        c10::InferenceMode guard;
+        TORCH_GUARD;
         model_outs = model(model_args).toTupleRef().elements();
     }
 
     // ingest a single sample of audio input
     void write(float x) {
-        c10::InferenceMode guard;
+        TORCH_GUARD;
 
         // write to resampler
         res_in->write(x);
@@ -117,6 +121,7 @@ struct LLModel {
     } 
     // return a single sample of audio output
     void read(float * buf, float * latent_buf) {
+        TORCH_GUARD;
         float x[MAX_LOOPS];
         RANGE(i, n_loops) x[i] = 0;
 
@@ -156,6 +161,7 @@ struct LLModel {
 
     // start the next block of processing
     void dispatch() {
+        TORCH_GUARD;
         PRINT("dispatch");
 
         if (compute_thread && compute_thread->joinable()) 
@@ -175,6 +181,7 @@ struct LLModel {
     } 
     // finish the last block of processing
     void join() {
+        TORCH_GUARD;
         // join model thread
         PRINT("join");
         if (!compute_thread) 
@@ -190,8 +197,8 @@ struct LLModel {
     }
     
     void _load(const std::string& filename) {
+        TORCH_GUARD;
         try {
-            c10::InferenceMode guard;
             model = torch::jit::load(filename);
             model.eval();
             // this->model = torch::jit::optimize_for_inference(this->model);
@@ -227,7 +234,7 @@ struct LLModel {
         PRINT("\tsample rate: " << sr );
         PRINT("\tlatent size: " << n_latent );
 
-        c10::InferenceMode guard;
+        // TORCH_GUARD;
         model_args.clear();
         model_args.push_back(torch::IValue(0)); //loop
         model_args.push_back(torch::ones({1,1,block_size})); //audio

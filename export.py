@@ -9,6 +9,7 @@ import numpy as np
 from fire import Fire
 import logging
 from termcolor import colored
+from tqdm import tqdm
 
 from loop import Loop
 
@@ -140,7 +141,7 @@ class LivingLooper(nn.Module):
             for loop in self.loops:
                 loop.feed(step, torch.zeros(self.n_latent))
 
-    def forward(self, loop_index:int, x, auto:int=0, thru:int=1):
+    def forward(self, loop_index:int, x, auto:int=0, thru:int=0):
         """
         Args:
             loop_index: loop record index
@@ -162,9 +163,13 @@ class LivingLooper(nn.Module):
         # return self.decode(self.encode(x)) ### DEBUG
 
         # always encode for cache, even if result is not used
-        z = self.encode(x).squeeze()
-        print(z)
-
+        if self.verbose > 1:
+            print(f'encoding...')
+        with torch.no_grad():
+            z = self.encode(x).squeeze()
+        if self.verbose > 1:
+            print(f'done')
+            # print(z)
 
         if (loop_index!=self.prev_loop_index and loop_index < 0):
             self.reset_loop(-loop_index - 1)
@@ -249,13 +254,14 @@ class LivingLooper(nn.Module):
         # fit active loop / predict other loops
         for l,loop in enumerate(self.loops):            
             if (i-1)==l:
+                t = self.step#TODO - self.latency_correct
                 feat = self.get_feature(l, self.latency_correct)
                 zl = z
-                loop.partial_fit(feat, z)
+                loop.partial_fit(t, feat, z)
                 # in this case, feed happened above
             else:
                 feat = self.get_feature(l, 1)
-                zl = loop.predict(feat)
+                zl = loop.predict(self.step, feat)
                 loop.feed(self.step, zl)
             self.zs[:,l] = zl
 
@@ -266,7 +272,8 @@ class LivingLooper(nn.Module):
         # self.mask[:,0] = 1
         # self.mask[:,1:] = 0
 
-        y = self.decode(self.zs.permute(1,2,0)) # loops, channels (1), time
+        with torch.no_grad():
+            y = self.decode(self.zs.permute(1,2,0)) # loops, channels (1), time
 
         fade = torch.linspace(0,1,y.shape[2])
         mask = self.mask[1,:,None,None] * fade + self.mask[0,:,None,None] * (1-fade)
@@ -306,8 +313,10 @@ class LivingLooper(nn.Module):
         for j,loop in enumerate(self.loops): 
             if i==j:
                 if self.verbose>0:
-                    print(f'RESET {i+1}')
+                    print(f'resetting {i+1}...')
                 loop.reset()
+                if self.verbose>0:
+                    print(f'done')
         self.mask[1,i] = 0.
 
     def finalize_loop(self, i:int):
@@ -328,7 +337,7 @@ class LivingLooper(nn.Module):
                 for dt in range(self.latency_correct+1,1,-1):
                     # print(f'rollout {dt}')
                     feat = self.get_feature(i,dt)
-                    z = loop.predict(feat)
+                    z = loop.predict(self.step-dt, feat)
                     loop.feed(self.step-dt+1, z)
                     
         self.mask[1,i] = 1.
@@ -401,33 +410,28 @@ def main(
 
     def smoke_test():
         looper.reset()
-        feed(0)
-        for _ in range(31):
-            feed(2)
-        for _ in range(context+3):
-            feed(1)
-        for _ in range(10):
-            feed(0)
-
+        for l in tqdm([0] + [2]*31 + [1]*(context+3) + [0]*10):
+            feed(l)
         if test <= 1: return
         #...
         feed(0)
 
-    with torch.inference_mode():
-        logging.info("smoke test with pytorch")
-        if test > 0:
-            smoke_test()
+    # with torch.inference_mode():
+    logging.info("smoke test with pytorch")
+    if test > 0:
+        smoke_test()
 
-        looper.reset()
+    looper.reset()
 
-        logging.info("compiling torchscript")
-        looper = torch.jit.script(looper)
+    logging.info("compiling torchscript")
+    looper = torch.jit.script(looper)
 
-        logging.info("smoke test with torchscript")
-        if test > 0:
-            smoke_test()
+    logging.info("smoke test with torchscript")
+    if test > 0:
+        smoke_test()
 
-        looper.reset()
+    looper.reset()
+    ###
 
     fname = f"ll_{name}_l{loops}_z{looper.n_latent}.ts"
     logging.info(f"saving '{fname}'")
