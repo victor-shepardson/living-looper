@@ -70,8 +70,8 @@ class Loop(torch.nn.Module):
         # self.target_xform = LinQuad()
         self.target_xform = Id()
 
-        # self.feat_xform = Tanh()
-        self.feat_xform = Id()
+        self.feat_xform = Tanh()
+        # self.feat_xform = Id()
 
         self.model = GDKR(n_feature, n_latent)
         # n_latent_ipls = 16

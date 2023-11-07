@@ -254,7 +254,7 @@ class LivingLooper(nn.Module):
         # fit active loop / predict other loops
         for l,loop in enumerate(self.loops):            
             if (i-1)==l:
-                t = self.step#TODO - self.latency_correct
+                t = self.step - self.latency_correct
                 feat = self.get_feature(l, self.latency_correct)
                 zl = z
                 loop.partial_fit(t, feat, z)
@@ -331,7 +331,6 @@ class LivingLooper(nn.Module):
         # (can't index ModuleList except with literal)
         for j,loop in enumerate(self.loops): 
             if i==j:
-                # loop.store(mem, self.step) # NOTE: disabled
                 loop.finalize()
                 # rollout predictions to make up latency
                 for dt in range(self.latency_correct+1,1,-1):
@@ -370,7 +369,8 @@ def main(
     latency_correct=2,
     # latent-limiter feature
     # last value is repeated for remaining latents
-    limit_margin=[0.1, 0.5, 1],
+    # limit_margin=[0.1, 0.5, 1],
+    limit_margin=[0.1, 0.5],
     # included in output filename
     name="test",
     verbose=0,

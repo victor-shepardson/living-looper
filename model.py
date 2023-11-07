@@ -168,17 +168,24 @@ class GDKR(torch.nn.Module):
         # parameters: phase, frequency, amplitude of N periodic functions
         self.register_buffer('memory', torch.empty(memory_size, n_target))
         self.register_buffer('t_memory', torch.empty(memory_size, dtype=torch.long))
+        self.register_buffer('feat_memory', torch.empty(memory_size, n_feat))
         self.register_buffer('amp', torch.empty(self.n_func, n_target))
         # self.register_buffer('freq', torch.empty(self.n_func, 1))
         self.register_buffer('freq', torch.empty(self.n_func, n_target))
         self.register_buffer('center_freq', 
             torch.linspace(0.01, 0.99, self.n_func)[:,None].logit())
         self.register_buffer('phase', torch.empty(self.n_func, n_target))
+        self.register_buffer('err_proj', torch.empty(n_target, n_target))
+        self.register_buffer('res_proj', torch.empty(n_feat+n_target, n_target))
+        self.register_buffer('feat_mean', torch.empty(n_feat))
         self.register_buffer('bias', torch.empty(n_target))
+
         self.register_buffer('amp_grad', torch.empty(self.n_func, n_target))
         self.register_buffer('freq_grad', torch.empty(self.n_func, n_target))
         self.register_buffer('phase_grad', torch.empty(self.n_func, n_target))
-        # self.register_buffer('bias_grad', torch.empty(n_target))
+        self.register_buffer('err_proj_grad', torch.empty(n_target, n_target))
+        self.register_buffer('res_proj_grad', torch.empty(n_feat+n_target, n_target))
+
         self.reset()
 
     def reset(self):
@@ -187,12 +194,17 @@ class GDKR(torch.nn.Module):
         self.amp_grad.zero_()
         self.freq_grad.zero_()
         self.phase_grad.zero_()
+        self.err_proj.zero_()
+        self.res_proj.zero_()
         # self.bias_grad.zero_()
         self.amp.fill_(1/self.n_func**0.5)
         # self.freq[:] = torch.linspace(0.01, 0.99, self.n_func)[:,None].logit()
         self.freq.zero_()
         self.phase[:] = torch.rand_like(self.phase)
         self.bias.zero_()
+        self.feat_mean.zero_()
+        self.err_proj_grad.zero_()
+        self.res_proj_grad.zero_()
 
     def get_amp(self, amp):
         # return (amp.exp() + 1).log()
@@ -206,6 +218,15 @@ class GDKR(torch.nn.Module):
 
     def get_phase(self, phase):
         return phase
+    
+    def get_err(self, z, err_proj):
+        return torch.nn.functional.softplus(z @ err_proj)
+    
+    def get_resid(self, x, z, res_proj):
+        r = torch.cat((x-self.feat_mean, z-self.bias), -1) @ res_proj 
+        # r = r * 0
+        r = r.tanh()
+        return r
 
     @torch.jit.export
     def evaluate(self, t):
@@ -218,16 +239,20 @@ class GDKR(torch.nn.Module):
         a = self.get_amp(amp)
         fr = self.get_freq(freq)
         p = self.get_phase(phase)
-        x = (((t * fr + p) * 2 * math.pi).sin() * a).sum(1) / self.n_func**0.5
+        z = (((t * fr + p) * 2 * math.pi).sin() * a).sum(1) / self.n_func**0.5
         # Tensor[batch, target]
-        return x + bias
+        z = z + bias
+        return z
 
     def sample_wedge(self, n:int):
         r = torch.rand(2,n)
         return (r.sum(0) - 1).abs()
 
     def predict(self, t:int, x):
-        return self.evaluate(torch.full((1,), float(t)))[0]
+        z = self.evaluate(torch.full((1,), float(t)))[0]
+        z = z + self.get_resid(x, z, self.res_proj)
+        err = self.get_err(z, self.err_proj)
+        return z + torch.randn_like(z) * err
 
     def finalize(self):
         pass
@@ -240,6 +265,7 @@ class GDKR(torch.nn.Module):
 
     # def _partial_fit(self, t:int, x, z):
         self.memory[self.data_size] = z
+        self.feat_memory[self.data_size] = x
         self.t_memory[self.data_size] = t
         self.data_size += 1
         # self.lr.mul_(self.lr_decay)
@@ -247,7 +273,9 @@ class GDKR(torch.nn.Module):
         # print(self.lr)
 
         self.bias[:] = (self.bias * self.data_size + z) / (self.data_size + 1)
+        self.feat_mean[:] = (self.feat_mean * self.data_size + x) / (self.data_size + 1)
 
+        # TODO: crazy idea: resample everything to noninteger t for experience replay?
         i = self.data_size - 1
         ts = i - (self.sample_wedge(self.n) * i).long()
 
@@ -263,45 +291,68 @@ class GDKR(torch.nn.Module):
             amp = self.amp.clone().requires_grad_()
             freq = self.freq.clone().requires_grad_()
             phase = self.phase.clone().requires_grad_()
-            bias = self.bias#.clone().requires_grad_()
+            # bias = self.bias#.clone().requires_grad_()
+            err_proj = self.err_proj.clone().requires_grad_()
+            res_proj = self.res_proj.clone().requires_grad_()
             self.amp_grad.mul_(self.momentum)
             self.freq_grad.mul_(self.momentum)
             self.phase_grad.mul_(self.momentum)
+            self.err_proj_grad.mul_(self.momentum)
+            self.res_proj_grad.mul_(self.momentum)
             # self.bias_grad.mul_(self.momentum)
 
-            t_batch, z_batch = self.t_memory[batch], self.memory[batch]
-            z_ = self._evaluate(t_batch, amp, freq, phase, bias)
+            t_batch, z_batch, x_batch = (
+                self.t_memory[batch], self.memory[batch], self.feat_memory[batch])
+            z_ = self._evaluate(t_batch, amp, freq, phase, self.bias)
             # print(t.shape, x.shape, x_.shape)
 
-            loss = (z_batch - z_).abs().sum(-1).mean()
             # amp penalty for sparsity
-            loss = loss + self.get_amp(amp).abs().sum() * self.amp_decay
+            loss = self.get_amp(amp).abs().sum() * self.amp_decay
+
+            # loss with just periodic functions
+            loss = loss + (z_batch - z_).abs().sum(-1).mean()
+
             # TODO: harmonicity loss?
             # print(f0.shape, self.freq.shape)
 
-            ag, pg, fg = torch.autograd.grad(
-                [loss], [amp, phase, freq],
+            # residual estimation from feature
+            # resid_ = self.get_resid(x_batch, z_.detach(), res_proj)
+            resid_ = self.get_resid(x_batch, z_, res_proj)
+            # print(resid_.abs().max())
+            z_ = z_ + resid_
+            err = (z_batch - z_).abs()
+            loss = loss + err.sum(-1).mean() / 10
+
+            # error estimation
+            err_ = self.get_err(z, err_proj)
+            loss = loss + (err - err_).abs().sum(-1).mean()
+
+            ag, pg, fg, eg, rg = torch.autograd.grad(
+                [loss], [amp, phase, freq, err_proj, res_proj],
                 )
-            # ag, pg, fg, bg = torch.autograd.grad(
-            #     [loss], [amp, phase, freq, bias],
-            #     )
+
             if torch.jit.isinstance(ag, torch.Tensor):
+                ag = ag / (torch.linalg.vector_norm(ag.flatten()) + 1)
                 self.amp_grad.add_(ag)
                 self.amp.sub_(self.amp_grad*self.lr)
             if torch.jit.isinstance(fg, torch.Tensor):
+                fg = fg / (torch.linalg.vector_norm(fg.flatten()) + 1)
                 self.freq_grad.add_(fg)
-                # self.freq.sub_(self.freq_grad*self.lr / 3)
                 self.freq.sub_(self.freq_grad*self.lr)
-                # print(fg.shape, fg)
-            # else:
-                # print(fg)
             if torch.jit.isinstance(pg, torch.Tensor):
+                pg = pg / (torch.linalg.vector_norm(pg.flatten()) + 1)
                 self.phase_grad.add_(pg)
-                self.phase.sub_(self.phase_grad*self.lr / 1)
+                self.phase.sub_(self.phase_grad*self.lr)
                 self.phase.remainder_(1)
-            # if torch.jit.isinstance(bg, torch.Tensor):
-            #     self.bias_grad.add_(bg)
-            #     self.bias.sub_(self.bias_grad*self.lr)
+            if torch.jit.isinstance(eg, torch.Tensor):
+                eg = eg / (torch.linalg.vector_norm(eg.flatten()) + 1)
+                self.err_proj_grad.add_(eg)
+                self.err_proj.sub_(self.err_proj_grad*self.lr)
+            if torch.jit.isinstance(rg, torch.Tensor):
+                print(rg.abs().max())
+                rg = rg / (torch.linalg.vector_norm(rg.flatten()) + 1)
+                self.res_proj_grad.add_(rg)
+                self.res_proj.sub_(self.res_proj_grad*self.lr)
         
 
 def fit_model(X, Y, cls, **kw):
