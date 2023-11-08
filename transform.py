@@ -17,7 +17,7 @@ class Quad(torch.nn.Module):
     """
     """
     def forward(self, z):
-        return z**2
+        return z.sign() * z**2
 
     def inv(self, z):
         return z.sign()*z.abs().sqrt()

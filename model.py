@@ -153,36 +153,39 @@ class GDKR(torch.nn.Module):
     batch_size:int
     data_size:int
     def __init__(self, 
-            n_feat:int, n_target:int, memory_size:int=4096, n_func:int=128):
+            n_feat:int, n_target:int, memory_size:int=4096, n_func:int=32):
         super().__init__()
         self.n_func = n_func
         self.lr_start = 1.0
         self.lr_decay = 0.977
+        self.weight_decay = 1e-2
+        # self.amp_decay = 1e-1
         self.amp_decay = 1e-2
+        self.mm_lr = 3e-2
         # self.amp_decay = 1e-3
-        self.n = 64
+        self.n = 32#64
         self.batch_size = 16
         self.momentum = 0.85
         self.data_size = 0
         self.lr = self.lr_start
+        # freq_per_target = n_target
+        freq_per_target = 1
         # parameters: phase, frequency, amplitude of N periodic functions
         self.register_buffer('memory', torch.empty(memory_size, n_target))
         self.register_buffer('t_memory', torch.empty(memory_size, dtype=torch.long))
         self.register_buffer('feat_memory', torch.empty(memory_size, n_feat))
-        self.register_buffer('amp', torch.empty(self.n_func, n_target))
+        self.register_buffer('amp', torch.empty(self.n_func, n_target, dtype=torch.complex64))
         # self.register_buffer('freq', torch.empty(self.n_func, 1))
-        self.register_buffer('freq', torch.empty(self.n_func, n_target))
+        self.register_buffer('freq', torch.empty(self.n_func, freq_per_target))
         self.register_buffer('center_freq', 
             torch.linspace(0.01, 0.99, self.n_func)[:,None].logit())
-        self.register_buffer('phase', torch.empty(self.n_func, n_target))
         self.register_buffer('err_proj', torch.empty(n_target, n_target))
         self.register_buffer('res_proj', torch.empty(n_feat+n_target, n_target))
         self.register_buffer('feat_mean', torch.empty(n_feat))
         self.register_buffer('bias', torch.empty(n_target))
 
-        self.register_buffer('amp_grad', torch.empty(self.n_func, n_target))
-        self.register_buffer('freq_grad', torch.empty(self.n_func, n_target))
-        self.register_buffer('phase_grad', torch.empty(self.n_func, n_target))
+        self.register_buffer('amp_grad', torch.empty(self.n_func, n_target, dtype=torch.complex64))
+        self.register_buffer('freq_grad', torch.empty(self.n_func, freq_per_target))
         self.register_buffer('err_proj_grad', torch.empty(n_target, n_target))
         self.register_buffer('res_proj_grad', torch.empty(n_feat+n_target, n_target))
 
@@ -193,14 +196,12 @@ class GDKR(torch.nn.Module):
         self.lr = self.lr_start
         self.amp_grad.zero_()
         self.freq_grad.zero_()
-        self.phase_grad.zero_()
         self.err_proj.zero_()
         self.res_proj.zero_()
         # self.bias_grad.zero_()
         self.amp.fill_(1/self.n_func**0.5)
         # self.freq[:] = torch.linspace(0.01, 0.99, self.n_func)[:,None].logit()
         self.freq.zero_()
-        self.phase[:] = torch.rand_like(self.phase)
         self.bias.zero_()
         self.feat_mean.zero_()
         self.err_proj_grad.zero_()
@@ -216,30 +217,28 @@ class GDKR(torch.nn.Module):
         freq = self.center_freq + freq.tanh()*64/self.n_func
         return freq.sigmoid()/2
 
-    def get_phase(self, phase):
-        return phase
-    
     def get_err(self, z, err_proj):
         return torch.nn.functional.softplus(z @ err_proj)
     
     def get_resid(self, x, z, res_proj):
         r = torch.cat((x-self.feat_mean, z-self.bias), -1) @ res_proj 
         # r = r * 0
-        r = r.tanh()
+        # r = r.tanh()
+        r = r / (r.abs() + 1)
         return r
 
     @torch.jit.export
     def evaluate(self, t):
-        return self._evaluate(t, self.amp, self.freq, self.phase, self.bias)
+        return self._evaluate(t, self.amp, self.freq, self.bias)
 
-    def _evaluate(self, t, amp, freq, phase, bias):
+    def _evaluate(self, t, amp, freq, bias):
         # t: Tensor[batch]
         t = t[:,None,None]
         # Tensor[batch, basis, target]
         a = self.get_amp(amp)
         fr = self.get_freq(freq)
-        p = self.get_phase(phase)
-        z = (((t * fr + p) * 2 * math.pi).sin() * a).sum(1) / self.n_func**0.5
+        # z = (((t * fr + p) * 2 * math.pi).sin() * a).sum(1) / self.n_func**0.5
+        z = ((t * fr * 2j * math.pi).exp() * a).real.sum(1) / self.n_func**0.5
         # Tensor[batch, target]
         z = z + bias
         return z
@@ -251,8 +250,9 @@ class GDKR(torch.nn.Module):
     def predict(self, t:int, x):
         z = self.evaluate(torch.full((1,), float(t)))[0]
         z = z + self.get_resid(x, z, self.res_proj)
-        err = self.get_err(z, self.err_proj)
-        return z + torch.randn_like(z) * err
+        # err = self.get_err(z, self.err_proj).sqrt()
+        # z = z + torch.randn_like(z) * err
+        return z
 
     def finalize(self):
         pass
@@ -290,24 +290,20 @@ class GDKR(torch.nn.Module):
         for batch in batches:
             amp = self.amp.clone().requires_grad_()
             freq = self.freq.clone().requires_grad_()
-            phase = self.phase.clone().requires_grad_()
-            # bias = self.bias#.clone().requires_grad_()
-            err_proj = self.err_proj.clone().requires_grad_()
+            # err_proj = self.err_proj.clone().requires_grad_()
             res_proj = self.res_proj.clone().requires_grad_()
             self.amp_grad.mul_(self.momentum)
             self.freq_grad.mul_(self.momentum)
-            self.phase_grad.mul_(self.momentum)
-            self.err_proj_grad.mul_(self.momentum)
+            # self.err_proj_grad.mul_(self.momentum)
             self.res_proj_grad.mul_(self.momentum)
-            # self.bias_grad.mul_(self.momentum)
 
             t_batch, z_batch, x_batch = (
                 self.t_memory[batch], self.memory[batch], self.feat_memory[batch])
-            z_ = self._evaluate(t_batch, amp, freq, phase, self.bias)
+            z_ = self._evaluate(t_batch, amp, freq, self.bias)
             # print(t.shape, x.shape, x_.shape)
 
             # amp penalty for sparsity
-            loss = self.get_amp(amp).abs().sum() * self.amp_decay
+            loss = self.get_amp(amp).abs().sqrt().sum() * self.amp_decay
 
             # loss with just periodic functions
             loss = loss + (z_batch - z_).abs().sum(-1).mean()
@@ -319,17 +315,31 @@ class GDKR(torch.nn.Module):
             # resid_ = self.get_resid(x_batch, z_.detach(), res_proj)
             resid_ = self.get_resid(x_batch, z_, res_proj)
             # print(resid_.abs().max())
-            z_ = z_ + resid_
-            err = (z_batch - z_).abs()
-            loss = loss + err.sum(-1).mean() / 10
+            z_ = z_.detach() + resid_
+            res_loss = (z_batch - z_).abs().sum(-1).mean()
+            # weight decay
+            res_loss = res_loss + self.res_proj.abs().sum() * self.weight_decay
 
-            # error estimation
-            err_ = self.get_err(z, err_proj)
-            loss = loss + (err - err_).abs().sum(-1).mean()
+            loss = loss + res_loss * self.mm_lr
 
-            ag, pg, fg, eg, rg = torch.autograd.grad(
-                [loss], [amp, phase, freq, err_proj, res_proj],
+            # # error estimation
+            # err_ = self.get_err(z, err_proj)
+            # err_loss = ((z_batch - z_).pow(2) - err_).abs().sum(-1).mean()
+            # err_loss = err_loss + self.err_proj.abs().sum() * self.weight_decay
+
+            # loss = loss + err_loss * 1e-3
+
+            # loss = loss + (err.pow(2) - err_).pow(2).sum(-1).mean()
+
+            # ag, fg, eg, rg = torch.autograd.grad(
+            #     [loss], [amp, freq, err_proj, res_proj],
+            #     )
+            ag, fg, rg = torch.autograd.grad(
+                [loss], [amp, freq, res_proj],
                 )
+            # ag, fg = torch.autograd.grad(
+            #     [loss], [amp, freq],
+            #     )
 
             if torch.jit.isinstance(ag, torch.Tensor):
                 ag = ag / (torch.linalg.vector_norm(ag.flatten()) + 1)
@@ -339,17 +349,12 @@ class GDKR(torch.nn.Module):
                 fg = fg / (torch.linalg.vector_norm(fg.flatten()) + 1)
                 self.freq_grad.add_(fg)
                 self.freq.sub_(self.freq_grad*self.lr)
-            if torch.jit.isinstance(pg, torch.Tensor):
-                pg = pg / (torch.linalg.vector_norm(pg.flatten()) + 1)
-                self.phase_grad.add_(pg)
-                self.phase.sub_(self.phase_grad*self.lr)
-                self.phase.remainder_(1)
-            if torch.jit.isinstance(eg, torch.Tensor):
-                eg = eg / (torch.linalg.vector_norm(eg.flatten()) + 1)
-                self.err_proj_grad.add_(eg)
-                self.err_proj.sub_(self.err_proj_grad*self.lr)
+            # if torch.jit.isinstance(eg, torch.Tensor):
+            #     eg = eg / (torch.linalg.vector_norm(eg.flatten()) + 1)
+            #     self.err_proj_grad.add_(eg)
+            #     self.err_proj.sub_(self.err_proj_grad*self.lr)
             if torch.jit.isinstance(rg, torch.Tensor):
-                print(rg.abs().max())
+                # print(rg.abs().max())
                 rg = rg / (torch.linalg.vector_norm(rg.flatten()) + 1)
                 self.res_proj_grad.add_(rg)
                 self.res_proj.sub_(self.res_proj_grad*self.lr)

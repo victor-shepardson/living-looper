@@ -16,7 +16,7 @@ namespace LivingLooper {
 #define MAX_LOOPS 32
 #define SWAP(A, B) auto temp = A; A = B; B = temp;
 #define RANGE(I, N) for(int I=0; I<N; I++)
-#define PRINT(X) ;//std::cout << X << std::endl;
+#define PRINT(X) std::cout << X << std::endl;
 #define TORCH_GUARD ;
 // #define TORCH_GUARD c10::InferenceMode guard;
 
@@ -162,7 +162,7 @@ struct LLModel {
     // start the next block of processing
     void dispatch() {
         TORCH_GUARD;
-        PRINT("dispatch");
+        // PRINT("dispatch");
 
         if (compute_thread && compute_thread->joinable()) 
             PRINT("ERROR: trying to start compute_thread before previous one is finished");
@@ -183,7 +183,7 @@ struct LLModel {
     void join() {
         TORCH_GUARD;
         // join model thread
-        PRINT("join");
+        // PRINT("join");
         if (!compute_thread) 
             PRINT("ERROR: no compute thread");
         if (!compute_thread->joinable()) 
