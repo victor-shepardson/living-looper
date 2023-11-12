@@ -20,12 +20,15 @@ class IPLS(torch.nn.Module):
         n_latent:int = 8,
         burn_in:int = 3,
         inner_steps:int = 2,
-        fit_error:bool = True,
+        fit_error:int = 2,
         ):
         super().__init__()
         self.burn_in = burn_in
         self.inner_steps = inner_steps
         self.fit_error = fit_error
+
+        if fit_error:
+            n_target = n_target*(fit_error+1)
 
         self.register_buffer('mu_x', torch.empty(n_feat))
         self.register_buffer('mu_y', torch.empty(n_target))
@@ -46,7 +49,7 @@ class IPLS(torch.nn.Module):
         # steps count
         self.register_buffer('n', torch.empty((1,), dtype=torch.long))
 
-        self.register_buffer('var', torch.empty(n_target))
+        # self.register_buffer('var', torch.empty(n_target))
 
         # prediction weights
         self.register_buffer('H', torch.empty(n_feat, n_target))
@@ -68,7 +71,7 @@ class IPLS(torch.nn.Module):
         self.bz.zero_()
         self.P.zero_()
 
-        self.var.zero_()
+        # self.var.zero_()
         # self.var[:] = 1
 
         self.H.zero_()
@@ -77,6 +80,9 @@ class IPLS(torch.nn.Module):
 
     @torch.jit.export
     def partial_fit(self, _:int, x, y):
+        if self.fit_error > 0:
+            y = torch.cat([y**m for m in range(1, self.fit_error+2)], -1)
+
         n = self.n
         self.mu_x[:] = self.mu_x * n/(n+1) + x/(n+1)
         self.mu_y[:] = self.mu_y * n/(n+1) + y/(n+1)
@@ -84,11 +90,11 @@ class IPLS(torch.nn.Module):
         # self.mu_y[:] = (self.mu_y * self.n + y) / (self.n+1)
         self.n[:] = self.n + 1
 
-        if self.n > self.burn_in + 1 and self.fit_error:
-            self.finalize()
-            y_ = self.predict(_, x, temp=0.0)
-            n = self.n - self.burn_in - 1
-            self.var[:] = self.var * n/(n+1) + (y - y_)**2 / (n+1)
+        # if self.n > self.burn_in + 1 and self.fit_error:
+        #     self.finalize()
+        #     y_ = self.predict(_, x, temp=0.0)
+        #     n = self.n - self.burn_in - 1
+        #     self.var[:] = self.var * n/(n+1) + (y - y_)**2 / (n+1)
             # print(self.var)
 
         x = x - self.mu_x
@@ -154,14 +160,47 @@ class IPLS(torch.nn.Module):
             # print(self.P)
             self.H[:] = torch.linalg.pinv(self.P) * b @ C
             # print(self.H)
+        # print(self.mu_y.chunk(3, -1))
 
     @torch.jit.export
-    def predict(self, t:int, x, temp:float=0.5):
+    def predict(self, t:int, x, temp:float=1):
+        # y = self.mu_y
         y = (x - self.mu_x)@self.H + self.mu_y
-        if temp>0 and self.fit_error:
-            y = y + self.var.sqrt()*temp*torch.randn_like(y)
+
+        if self.fit_error==1:
+            y, y2 = y.chunk(2, -1)
+            if temp>0:
+                w = (y2 - y**2).clip(0, 1).sqrt()
+                y = y + w*temp*torch.randn_like(y)
+        elif self.fit_error==2:
+            y, y2, y3 = y.chunk(3, -1)
+            if temp>0:
+                mu = y
+                sigma = (y2 - y**2).clip(1e-3, 1).sqrt()
+                gamma = ((y3 - 3*mu*sigma**2 - mu**3) / sigma**3).clip(-.995, .995)
+                g23 = gamma.abs()**(2/3)
+                delta2 = math.pi/2 * g23/(g23 + ((4-math.pi)/2)**(2/3))
+                delta = gamma.sgn() * delta2.sqrt()
+                alpha = delta / (1 - delta2).sqrt()
+                omega = sigma / (1 - 2/math.pi*delta2).sqrt()
+                xi = mu - omega*delta*(2/math.pi)**0.5
+                # print('mu', mu)
+                # print('sigma', sigma)
+                # print('gamma', gamma)
+                # print(xi, omega, alpha)
+                y = randn_skew(xi, omega, alpha)
+
         return y
 
+def randn_skew(loc, scale, alpha):
+    #https://stackoverflow.com/questions/36200913/generate-n-random-numbers-from-a-skew-normal-distribution-using-numpy
+    sigma = alpha / (1.0 + alpha**2)**0.5
+    u0 = torch.randn_like(loc)
+    v = torch.randn_like(loc)
+    u1 = (sigma*u0 + (1.0 - sigma**2)**0.5*v) * scale
+    u1[u0 < 0] *= -1
+    u1 = u1 + loc
+    return u1
 
 class GDKR(torch.nn.Module):
     """Gradient Descent Kernel Regression"""

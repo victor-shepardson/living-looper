@@ -390,6 +390,7 @@ def main(
         logging.info(f"using {model}")
 
         model = torch.jit.load(model).eval()
+        # print(model.latent_mean)
     else:
         raise ValueError
 

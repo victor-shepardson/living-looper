@@ -149,6 +149,7 @@ struct LLModel {
             // std::cout << "IDX" << latent_idx << std::endl;
             auto acc = latent_buffer.accessor<float, 3>();
             RANGE(i, n_loops) latent_buf[i] = acc[i][0][latent_idx];
+            // RANGE(i, n_loops) PRINT(i << " " << latent_idx << " " << latent_buf[i]);
             latent_idx++;
         } else {
             RANGE(i, n_loops) latent_buf[i] = 0.;
@@ -191,8 +192,8 @@ struct LLModel {
 
         compute_thread->join();
 
-        read_buffer = model_outs[0].toTensor();
-        latent_buffer = model_outs[1].toTensor();
+        read_buffer = model_outs[0].toTensor().clone();
+        latent_buffer = model_outs[1].toTensor().clone();
         latent_idx = 0;
     }
     
