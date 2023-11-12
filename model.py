@@ -20,10 +20,12 @@ class IPLS(torch.nn.Module):
         n_latent:int = 8,
         burn_in:int = 3,
         inner_steps:int = 2,
+        fit_error:bool = True,
         ):
         super().__init__()
         self.burn_in = burn_in
         self.inner_steps = inner_steps
+        self.fit_error = fit_error
 
         self.register_buffer('mu_x', torch.empty(n_feat))
         self.register_buffer('mu_y', torch.empty(n_target))
@@ -43,6 +45,8 @@ class IPLS(torch.nn.Module):
         self.register_buffer('P', torch.empty(n_latent, n_feat))
         # steps count
         self.register_buffer('n', torch.empty((1,), dtype=torch.long))
+
+        self.register_buffer('var', torch.empty(n_target))
 
         # prediction weights
         self.register_buffer('H', torch.empty(n_feat, n_target))
@@ -64,16 +68,28 @@ class IPLS(torch.nn.Module):
         self.bz.zero_()
         self.P.zero_()
 
+        self.var.zero_()
+        # self.var[:] = 1
+
         self.H.zero_()
 
         self.n.zero_()
 
     @torch.jit.export
     def partial_fit(self, _:int, x, y):
+        n = self.n
+        self.mu_x[:] = self.mu_x * n/(n+1) + x/(n+1)
+        self.mu_y[:] = self.mu_y * n/(n+1) + y/(n+1)
+        # self.mu_x[:] = (self.mu_x * self.n + x) / (self.n+1)
+        # self.mu_y[:] = (self.mu_y * self.n + y) / (self.n+1)
         self.n[:] = self.n + 1
-        # prior expectation the means are 0
-        self.mu_x[:] = (self.mu_x * self.n + x) / (self.n+1)
-        self.mu_y[:] = (self.mu_y * self.n + y) / (self.n+1)
+
+        if self.n > self.burn_in + 1 and self.fit_error:
+            self.finalize()
+            y_ = self.predict(_, x, temp=0.0)
+            n = self.n - self.burn_in - 1
+            self.var[:] = self.var * n/(n+1) + (y - y_)**2 / (n+1)
+            # print(self.var)
 
         x = x - self.mu_x
         y = y - self.mu_y
@@ -87,6 +103,7 @@ class IPLS(torch.nn.Module):
             tz = (self.Wz @ x) / (self.Wz.pow(2).sum(1).sqrt()+1e-7)
             self.t_sq_sum[:] = self.t_sq_sum + tz*tz
         else:
+
             for i in range(self.u.shape[0]):
                 tss = self.t_sq_sum[i]
 
@@ -130,15 +147,20 @@ class IPLS(torch.nn.Module):
     
     @torch.jit.export
     def finalize(self):
-        C = self.Cz / torch.linalg.vector_norm(
-            self.Cz, 2, 1, keepdim=True)
-        b = self.bz / self.t_sq_sum.sqrt()
-        # print(self.P)
-        self.H[:] = torch.linalg.pinv(self.P) * b @ C
+        if self.n > self.burn_in:
+            C = self.Cz / torch.linalg.vector_norm(
+                self.Cz, 2, 1, keepdim=True)
+            b = self.bz / self.t_sq_sum.sqrt()
+            # print(self.P)
+            self.H[:] = torch.linalg.pinv(self.P) * b @ C
+            # print(self.H)
 
     @torch.jit.export
-    def predict(self, t:int, x):
-        return (x - self.mu_x)@self.H + self.mu_y
+    def predict(self, t:int, x, temp:float=0.5):
+        y = (x - self.mu_x)@self.H + self.mu_y
+        if temp>0 and self.fit_error:
+            y = y + self.var.sqrt()*temp*torch.randn_like(y)
+        return y
 
 
 class GDKR(torch.nn.Module):
@@ -156,6 +178,7 @@ class GDKR(torch.nn.Module):
             n_feat:int, n_target:int, memory_size:int=4096, n_func:int=32):
         super().__init__()
         self.n_func = n_func
+        self.mem_size = memory_size
         self.lr_start = 1.0
         self.lr_decay = 0.977
         self.weight_decay = 1e-2
@@ -260,30 +283,27 @@ class GDKR(torch.nn.Module):
 
     @torch.jit.export
     def partial_fit(self, t:int, x, z):
-    #     with torch.inference_mode(False):
-    #         self._partial_fit(t, x, z)
 
-    # def _partial_fit(self, t:int, x, z):
-        self.memory[self.data_size] = z
-        self.feat_memory[self.data_size] = x
-        self.t_memory[self.data_size] = t
+        write_idx = self.data_size % self.mem_size
+        # print(write_idx, self.mem_size)
+        self.memory[write_idx] = z
+        self.feat_memory[write_idx] = x
+        self.t_memory[write_idx] = t
         self.data_size += 1
-        # self.lr.mul_(self.lr_decay)
+
         self.lr *= self.lr_decay
         # print(self.lr)
 
-        self.bias[:] = (self.bias * self.data_size + z) / (self.data_size + 1)
-        self.feat_mean[:] = (self.feat_mean * self.data_size + x) / (self.data_size + 1)
+        n = self.data_size
+        self.bias[:] = self.bias * n/(n+1) + z/(n+1)
+        self.feat_mean[:] = self.feat_mean * n/(n+1) + x/(n+1)
+        # self.bias[:] = (self.bias * self.data_size + z) / (self.data_size + 1)
+        # self.feat_mean[:] = (self.feat_mean * self.data_size + x) / (self.data_size + 1)
 
         # TODO: crazy idea: resample everything to noninteger t for experience replay?
         i = self.data_size - 1
-        ts = i - (self.sample_wedge(self.n) * i).long()
-
-        # print(ts)
-
-        assert (ts < self.data_size).all()
-        assert (ts>=0).all()
-        # TODO: deal with finite memory
+        ts = i - (self.sample_wedge(self.n) * min(i, self.mem_size)).long()
+        ts = ts % self.mem_size
 
         # print(samps)
         batches = ts.chunk(self.n//self.batch_size)
@@ -379,6 +399,8 @@ def fit_model(X, Y, cls, **kw):
 
     t_ns = time.time_ns()
     model.finalize()
+
+    ts = torch.tensor(ts).float()[1:]
 
     print(f'partial_fit time (mean): {torch.mean(ts)*1e-6} ms')
     print(f'partial_fit time (99%): {torch.quantile(ts, 0.99)*1e-6} ms')

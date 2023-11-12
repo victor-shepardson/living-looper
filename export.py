@@ -141,13 +141,16 @@ class LivingLooper(nn.Module):
             for loop in self.loops:
                 loop.feed(step, torch.zeros(self.n_latent))
 
-    def forward(self, loop_index:int, x, auto:int=0, thru:int=0):
+    def forward(self, loop_index:int, x, thru:int=0, auto:int=0):
         """
         Args:
             loop_index: loop record index
                 0 for no loop, 1-indexed loop to record, negative index to erase
             x: input audio
                 Tensor[1, 1, sample]
+            thru:
+                0 to mute loop while it is being recorded 
+                1 to pass the reconstruction through while recording
             auto:
                 0 for manual loop control
                 1 for replace median similar loop
@@ -186,7 +189,7 @@ class LivingLooper(nn.Module):
             if (
                 z[0].abs().item() > 1
                 and zd > 3
-                and (self.record_length > 48 or self.loop_index < 1)
+                and (self.record_length > 48 * 2048//self.block_size or self.loop_index < 1)
                 and torch.rand((1,)).item() > 0.5 ### TEST
                 ):
                 # auto-set a new loop index
@@ -248,7 +251,9 @@ class LivingLooper(nn.Module):
             if i>0: # starting a new loop recording
                 self.record_length = 0
                 self.reset_loop(i - 1)
-                self.mask[1,i-1] = 1 if thru else 0
+                if thru:
+                    self.mask[1,i-1] = 1
+                    print('unmask')
             self.loop_index = i
 
         # fit active loop / predict other loops
@@ -370,7 +375,7 @@ def main(
     # latent-limiter feature
     # last value is repeated for remaining latents
     # limit_margin=[0.1, 0.5, 1],
-    limit_margin=[0.1, 0.5],
+    limit_margin=[0.1, 0.2, 0.5],
     # included in output filename
     name="test",
     verbose=0,

@@ -24,7 +24,7 @@ namespace LivingLooper {
 // LLModel encapsulates the libtorch parts
 struct LLModel {
 
-    int loop_idx, oneshot, auto_mode;
+    int loop_idx, thru, auto_mode;
 
     torch::jit::Module model;
 
@@ -58,7 +58,7 @@ struct LLModel {
         this->host_sr = host_sr;
 
         loop_idx = 0;
-        oneshot = 0;
+        thru = 0;
 
         // TODO: expose processing latency to user
         // defaults to block_size - 1
@@ -173,7 +173,7 @@ struct LLModel {
         model_args[1] = temp;
 
         model_args[0] = torch::IValue(loop_idx); 
-        model_args[2] = torch::IValue(oneshot); 
+        model_args[2] = torch::IValue(thru); 
         model_args[3] = torch::IValue(auto_mode); 
 
         compute_thread = std::make_unique<std::thread>(&LLModel::forward, this);
@@ -238,7 +238,7 @@ struct LLModel {
         model_args.clear();
         model_args.push_back(torch::IValue(0)); //loop
         model_args.push_back(torch::ones({1,1,block_size})); //audio
-        model_args.push_back(torch::IValue(0)); //oneshot
+        model_args.push_back(torch::IValue(0)); //thru
         model_args.push_back(torch::IValue(0)); //auto
 
         delay = (block_size + m_processing_latency)/sr;
