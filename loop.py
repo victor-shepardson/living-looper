@@ -1,9 +1,10 @@
 from typing import Dict
 
 import torch
+from torch.nn import ModuleList
 
-from model import IPLS, GDKR
-from representation import Window, RNN
+from model import IPLS, GDKR, Moments
+from representation import Window, RNN, DividedQuadratic, Quadratic, Cat
 from transform import LinQuad, Tanh, Id
 
 class FeatureStore(torch.nn.Module):
@@ -58,7 +59,13 @@ class Loop(torch.nn.Module):
         self.n_latent = n_latent
 
         # self.rep = RNN(n_latent, 1024, 256)
-        self.rep = Window(n_latent, n_context)
+        # self.rep = Window(n_latent, n_context)
+
+        # self.rep = Cat(ModuleList((Quadratic(self.rep), self.rep)))
+        self.rep = Cat(ModuleList((
+            DividedQuadratic(Window(n_latent, 2)),
+            Window(n_latent, n_context)
+            )))
 
         # this assumes all loops use the same (sized) feature --
         # would need multiple stages of init to allow otherwise
@@ -67,16 +74,21 @@ class Loop(torch.nn.Module):
         self.store = FeatureStore(2*latency_correct)
 
         # for now assuming xform preserves target size
-        # self.target_xform = Id()
+        # self.target_xform = LinQuad()
+        # # self.target_xform = Id()
         # self.feat_xform = Tanh()
         # self.model = GDKR(n_feature, n_latent)
+        # # self.model = Moments(GDKR, n_feature, n_latent, n_moment=3)
+        # # self.model = Moments(GDKRR, n_feature, n_latent, n_moment=3)
 
         self.target_xform = LinQuad()
         self.feat_xform = Id()
         # n_latent_ipls = 64
         n_latent_ipls = n_latent
-        self.model = IPLS(
-            n_feat=n_feature, n_target=n_latent, n_latent=n_latent_ipls)
+        # self.model = IPLS(
+        #     n_feat=n_feature, n_target=n_latent, n_latent=n_latent_ipls)
+        self.model = Moments(IPLS,
+            n_feat=n_feature, n_target=n_latent, n_moment=2, n_latent=n_latent_ipls)
 
         self.register_buffer('limit_margin', limit_margin)
         self.register_buffer('z_min', 

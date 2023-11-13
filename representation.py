@@ -15,6 +15,55 @@ class Chain(torch.nn.Module):
         for l in self.layers:
             x = l.feed(x)
         return x
+    
+class Cat(torch.nn.Module):
+    def __init__(self, ms:torch.nn.ModuleList):
+        super().__init__()
+        self.ms = ms
+        self.n_feature = sum(m.n_feature for m in ms)
+    def reset(self):
+        for m in self.ms:
+            m.reset()
+    def feed(self, x, offset:int=0):
+        xs = []
+        for m in self.ms:
+            xs.append(m.feed(x, offset))
+        return torch.cat(xs, -1)
+    
+class Quadratic(torch.nn.Module):
+    def __init__(self, m:torch.nn.Module):
+        super().__init__()
+        self.m = m
+        self.n_feature = m.n_feature**2
+    def reset(self):
+        self.m.reset()
+    def feed(self, x, offset:int=0):
+        x = self.m.feed(x, offset)
+        return (x * x[...,None]).view(-1)
+    
+class DividedQuadratic(torch.nn.Module):
+    def __init__(self, m:torch.nn.Module):
+        super().__init__()
+        self.m = m
+        self.n_feature = m.n_feature**2 * 2
+    def reset(self):
+        self.m.reset()
+    def feed(self, x, offset:int=0):
+        x = self.m.feed(x, offset)
+        return (torch.cat((
+            torch.nn.functional.softplus(x), torch.nn.functional.softplus(-x)
+            )) * x[...,None]).view(-1)
+# class Quadratic(torch.nn.Module):
+#     def __init__(self, m:torch.nn.Module):
+#         super().__init__()
+#         self.m = m
+#         self.n_feature = (m.n_feature)**2 + m.n_feature
+#     def reset(self):
+#         self.m.reset()
+#     def feed(self, x, offset:int=0):
+#         x = self.m.feed(x, offset)
+
+#         return torch.cat((x, (x * x[...,None]).view(-1)), -1)
 
 
 class Window(torch.nn.Module):

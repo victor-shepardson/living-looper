@@ -170,6 +170,7 @@ class LivingLooper(nn.Module):
             print(f'encoding...')
         with torch.no_grad():
             z = self.encode(x).squeeze()
+            # print(z)
         if self.verbose > 1:
             print(f'done')
             # print(z)
@@ -351,6 +352,7 @@ class LivingLooper(nn.Module):
         feature encoder
         """
         return self.model.encode(x)
+        # return self.model.encode(x, temp=0.0)
 
     def decode(self, z):
         """

@@ -1,6 +1,105 @@
 import torch
 import time
 import math
+from typing import Union
+
+# wrap a predictor with mean subtraction
+# maybe not so useful -- experience replay benefits from using its own 
+# mean tracking, as the replayed data can be centered better
+# class ZeroMean(torch.nn.Module):
+#     """wrap another model to subtract the mean feature and target.
+#     """
+#     n:int
+#     def __init__(self, m:torch.nn.Module):
+#         super().__init__()
+#         self.m = m
+#         self.n_feat = m.n_feat
+#         self.n_target = m.n_target
+#         self.register_buffer('mu_x', torch.empty(self.n_feat))
+#         self.register_buffer('mu_y', torch.empty(self.n_target))
+#         self.n = 0
+
+#     def reset(self):
+#         self.m.reset()
+#         self.mu_x.zero_()
+#         self.mu_y.zero_()
+#         self.n = 0
+
+#     def finalize(self):
+#         self.m.finalize()
+
+#     def partial_fit(self, t:int, x, y):
+#         n = self.n
+#         self.mu_x[:] = self.mu_x * n/(n+1) + x/(n+1)
+#         self.mu_y[:] = self.mu_y * n/(n+1) + y/(n+1)
+#         self.n += 1
+#         self.m.partial_fit(t, x-self.mu_x, y-self.mu_y)
+
+#     def predict(self, t:int, x, temp:float=0.5):
+#         y = self.m.predict(t, x-self.mu_x, temp=temp) + self.mu_y
+#         return y
+
+
+class Moments(torch.nn.Module):
+    """wrap another model to predict y, y**2, (y**3),
+    and use these to estimate variance (skew) conditioned on input features.
+    sample predictions from a (skew) normal distribution.
+    """
+    def __init__(self, cls:type, n_feat:int, n_target:int, n_moment=3, **kw):
+        super().__init__()
+        self.m = cls(n_feat, n_target*n_moment, **kw)
+        self.n_moment = n_moment
+
+    def reset(self):
+        self.m.reset()
+
+    def finalize(self):
+        self.m.finalize()
+
+    def partial_fit(self, t:int, x, y):
+        y = torch.cat([y**m for m in range(1, self.n_moment+1)])
+        self.m.partial_fit(t, x, y)
+
+    def predict(self, t:int, x, temp:float=0.5):
+        y = self.m.predict(t, x, temp=0.0)
+
+        if self.n_moment==2:
+            y, y2 = y.chunk(2, -1)
+            if temp>0:
+                w = (y2 - y**2).clip(0, 1).sqrt()
+                y = y + w*temp*torch.randn_like(y)
+        elif self.n_moment==3:
+            y, y2, y3 = y.chunk(3, -1)
+            if temp>0:
+                # mean, standard deviation, skewness
+                mu = y
+                sigma = (y2 - y**2).clip(1e-3, 1).sqrt()
+                gamma = ((y3 - 3*mu*sigma**2 - mu**3) / sigma**3).clip(-.995, .995)
+                # skew normal parameters
+                g23 = gamma.abs()**(2/3)
+                delta2 = math.pi/2 * g23/(g23 + ((4-math.pi)/2)**(2/3))
+                delta = gamma.sgn() * delta2.sqrt()
+                alpha = delta / (1 - delta2).sqrt()
+                omega = sigma / (1 - 2/math.pi*delta2).sqrt()
+                xi = mu - omega*delta*(2/math.pi)**0.5
+                print('mu', mu)
+                print('sigma', sigma)
+                print('gamma', gamma)
+                # print(xi, omega, alpha)
+                y = randn_skew(xi, omega, alpha)
+
+        return y
+
+def randn_skew(loc, scale, alpha):
+    #adapted from https://stackoverflow.com/questions/36200913/generate-n-random-numbers-from-a-skew-normal-distribution-using-numpy
+    sigma = alpha / (1.0 + alpha**2)**0.5
+    u0 = torch.randn_like(loc)
+    v = torch.randn_like(loc)
+    u1 = (sigma*u0 + (1.0 - sigma**2)**0.5*v) * scale
+    u1[u0 < 0] *= -1
+    u1 = u1 + loc
+    return u1
+
 
 class IPLS(torch.nn.Module):
     """
@@ -20,15 +119,12 @@ class IPLS(torch.nn.Module):
         n_latent:int = 8,
         burn_in:int = 3,
         inner_steps:int = 2,
-        fit_error:int = 2,
         ):
         super().__init__()
+        self.n_feat = n_feat
+        self.n_target = n_target
         self.burn_in = burn_in
         self.inner_steps = inner_steps
-        self.fit_error = fit_error
-
-        if fit_error:
-            n_target = n_target*(fit_error+1)
 
         self.register_buffer('mu_x', torch.empty(n_feat))
         self.register_buffer('mu_y', torch.empty(n_target))
@@ -48,8 +144,6 @@ class IPLS(torch.nn.Module):
         self.register_buffer('P', torch.empty(n_latent, n_feat))
         # steps count
         self.register_buffer('n', torch.empty((1,), dtype=torch.long))
-
-        # self.register_buffer('var', torch.empty(n_target))
 
         # prediction weights
         self.register_buffer('H', torch.empty(n_feat, n_target))
@@ -71,31 +165,17 @@ class IPLS(torch.nn.Module):
         self.bz.zero_()
         self.P.zero_()
 
-        # self.var.zero_()
-        # self.var[:] = 1
-
         self.H.zero_()
 
         self.n.zero_()
 
     @torch.jit.export
     def partial_fit(self, _:int, x, y):
-        if self.fit_error > 0:
-            y = torch.cat([y**m for m in range(1, self.fit_error+2)], -1)
 
         n = self.n
         self.mu_x[:] = self.mu_x * n/(n+1) + x/(n+1)
         self.mu_y[:] = self.mu_y * n/(n+1) + y/(n+1)
-        # self.mu_x[:] = (self.mu_x * self.n + x) / (self.n+1)
-        # self.mu_y[:] = (self.mu_y * self.n + y) / (self.n+1)
         self.n[:] = self.n + 1
-
-        # if self.n > self.burn_in + 1 and self.fit_error:
-        #     self.finalize()
-        #     y_ = self.predict(_, x, temp=0.0)
-        #     n = self.n - self.burn_in - 1
-        #     self.var[:] = self.var * n/(n+1) + (y - y_)**2 / (n+1)
-            # print(self.var)
 
         x = x - self.mu_x
         y = y - self.mu_y
@@ -163,44 +243,11 @@ class IPLS(torch.nn.Module):
         # print(self.mu_y.chunk(3, -1))
 
     @torch.jit.export
-    def predict(self, t:int, x, temp:float=1):
-        # y = self.mu_y
+    def predict(self, t:int, x, temp:float=0.0):
+        # return self.mu_y
         y = (x - self.mu_x)@self.H + self.mu_y
-
-        if self.fit_error==1:
-            y, y2 = y.chunk(2, -1)
-            if temp>0:
-                w = (y2 - y**2).clip(0, 1).sqrt()
-                y = y + w*temp*torch.randn_like(y)
-        elif self.fit_error==2:
-            y, y2, y3 = y.chunk(3, -1)
-            if temp>0:
-                mu = y
-                sigma = (y2 - y**2).clip(1e-3, 1).sqrt()
-                gamma = ((y3 - 3*mu*sigma**2 - mu**3) / sigma**3).clip(-.995, .995)
-                g23 = gamma.abs()**(2/3)
-                delta2 = math.pi/2 * g23/(g23 + ((4-math.pi)/2)**(2/3))
-                delta = gamma.sgn() * delta2.sqrt()
-                alpha = delta / (1 - delta2).sqrt()
-                omega = sigma / (1 - 2/math.pi*delta2).sqrt()
-                xi = mu - omega*delta*(2/math.pi)**0.5
-                # print('mu', mu)
-                # print('sigma', sigma)
-                # print('gamma', gamma)
-                # print(xi, omega, alpha)
-                y = randn_skew(xi, omega, alpha)
-
         return y
 
-def randn_skew(loc, scale, alpha):
-    #https://stackoverflow.com/questions/36200913/generate-n-random-numbers-from-a-skew-normal-distribution-using-numpy
-    sigma = alpha / (1.0 + alpha**2)**0.5
-    u0 = torch.randn_like(loc)
-    v = torch.randn_like(loc)
-    u1 = (sigma*u0 + (1.0 - sigma**2)**0.5*v) * scale
-    u1[u0 < 0] *= -1
-    u1 = u1 + loc
-    return u1
 
 class GDKR(torch.nn.Module):
     """Gradient Descent Kernel Regression"""
@@ -223,33 +270,34 @@ class GDKR(torch.nn.Module):
         self.weight_decay = 1e-2
         # self.amp_decay = 1e-1
         self.amp_decay = 1e-2
-        self.mm_lr = 3e-2
         # self.amp_decay = 1e-3
         self.n = 32#64
         self.batch_size = 16
         self.momentum = 0.85
         self.data_size = 0
         self.lr = self.lr_start
-        # freq_per_target = n_target
-        freq_per_target = 1
+        # freq_per_func = n_target
+        freq_per_func = 1
         # parameters: phase, frequency, amplitude of N periodic functions
         self.register_buffer('memory', torch.empty(memory_size, n_target))
         self.register_buffer('t_memory', torch.empty(memory_size, dtype=torch.long))
-        self.register_buffer('feat_memory', torch.empty(memory_size, n_feat))
-        self.register_buffer('amp', torch.empty(self.n_func, n_target, dtype=torch.complex64))
-        # self.register_buffer('freq', torch.empty(self.n_func, 1))
-        self.register_buffer('freq', torch.empty(self.n_func, freq_per_target))
+
+        # self.register_buffer('amp', torch.empty(self.n_func, n_target, dtype=torch.complex64))
+        self.register_buffer('amp', torch.empty(self.n_func, n_target))
+        self.register_buffer('phase', torch.empty(self.n_func, n_target))
+
+        self.register_buffer('freq', torch.empty(self.n_func, freq_per_func))
         self.register_buffer('center_freq', 
             torch.linspace(0.01, 0.99, self.n_func)[:,None].logit())
-        self.register_buffer('err_proj', torch.empty(n_target, n_target))
-        self.register_buffer('res_proj', torch.empty(n_feat+n_target, n_target))
-        self.register_buffer('feat_mean', torch.empty(n_feat))
         self.register_buffer('bias', torch.empty(n_target))
 
-        self.register_buffer('amp_grad', torch.empty(self.n_func, n_target, dtype=torch.complex64))
-        self.register_buffer('freq_grad', torch.empty(self.n_func, freq_per_target))
-        self.register_buffer('err_proj_grad', torch.empty(n_target, n_target))
-        self.register_buffer('res_proj_grad', torch.empty(n_feat+n_target, n_target))
+        # damn, complex autograd doesn't work with JIT
+        # it was silently failing since amp is initialized to all real,
+        # apparently (?)
+        # self.register_buffer('amp_grad', torch.empty(self.n_func, n_target, dtype=torch.complex64))
+        self.register_buffer('amp_grad', torch.empty(self.n_func, n_target))
+        self.register_buffer('phase_grad', torch.empty(self.n_func, n_target))
+        self.register_buffer('freq_grad', torch.empty(self.n_func, freq_per_func))
 
         self.reset()
 
@@ -258,16 +306,12 @@ class GDKR(torch.nn.Module):
         self.lr = self.lr_start
         self.amp_grad.zero_()
         self.freq_grad.zero_()
-        self.err_proj.zero_()
-        self.res_proj.zero_()
-        # self.bias_grad.zero_()
+        self.phase_grad.zero_()
         self.amp.fill_(1/self.n_func**0.5)
+        self.phase[:] = torch.rand_like(self.phase)
         # self.freq[:] = torch.linspace(0.01, 0.99, self.n_func)[:,None].logit()
         self.freq.zero_()
         self.bias.zero_()
-        self.feat_mean.zero_()
-        self.err_proj_grad.zero_()
-        self.res_proj_grad.zero_()
 
     def get_amp(self, amp):
         # return (amp.exp() + 1).log()
@@ -278,44 +322,33 @@ class GDKR(torch.nn.Module):
     def get_freq(self, freq):
         freq = self.center_freq + freq.tanh()*64/self.n_func
         return freq.sigmoid()/2
-
-    def get_err(self, z, err_proj):
-        return torch.nn.functional.softplus(z @ err_proj)
     
-    def get_resid(self, x, z, res_proj):
-        r = torch.cat((x-self.feat_mean, z-self.bias), -1) @ res_proj 
-        # r = r * 0
-        # r = r.tanh()
-        r = r / (r.abs() + 1)
-        return r
-
     @torch.jit.export
     def evaluate(self, t):
         return self._evaluate(t, self.amp, self.freq, self.bias)
 
-    def _evaluate(self, t, amp, freq, bias):
+    def _evaluate(self, t, amp, freq, phase):
         # t: Tensor[batch]
         t = t[:,None,None]
         # Tensor[batch, basis, target]
         a = self.get_amp(amp)
         fr = self.get_freq(freq)
-        # z = (((t * fr + p) * 2 * math.pi).sin() * a).sum(1) / self.n_func**0.5
-        z = ((t * fr * 2j * math.pi).exp() * a).real.sum(1) / self.n_func**0.5
+        z = (((t * fr + phase) * 2 * math.pi).sin() * a).sum(1) / self.n_func**0.5
+        # z = ((t * fr * 2j * math.pi).exp() * a).real.sum(1) / self.n_func**0.5
         # Tensor[batch, target]
-        z = z + bias
+        z = z + self.bias
         return z
 
     def sample_wedge(self, n:int):
         r = torch.rand(2,n)
         return (r.sum(0) - 1).abs()
 
-    def predict(self, t:int, x):
+    @torch.jit.export
+    def predict(self, t:int, x, temp:float=0.0):
         z = self.evaluate(torch.full((1,), float(t)))[0]
-        z = z + self.get_resid(x, z, self.res_proj)
-        # err = self.get_err(z, self.err_proj).sqrt()
-        # z = z + torch.randn_like(z) * err
         return z
 
+    @torch.jit.export
     def finalize(self):
         pass
         # print(self.get_freq(self.freq))
@@ -326,18 +359,15 @@ class GDKR(torch.nn.Module):
         write_idx = self.data_size % self.mem_size
         # print(write_idx, self.mem_size)
         self.memory[write_idx] = z
-        self.feat_memory[write_idx] = x
         self.t_memory[write_idx] = t
         self.data_size += 1
 
         self.lr *= self.lr_decay
         # print(self.lr)
 
+        # compute target / feature mean exactly
         n = self.data_size
         self.bias[:] = self.bias * n/(n+1) + z/(n+1)
-        self.feat_mean[:] = self.feat_mean * n/(n+1) + x/(n+1)
-        # self.bias[:] = (self.bias * self.data_size + z) / (self.data_size + 1)
-        # self.feat_mean[:] = (self.feat_mean * self.data_size + x) / (self.data_size + 1)
 
         # TODO: crazy idea: resample everything to noninteger t for experience replay?
         i = self.data_size - 1
@@ -349,16 +379,14 @@ class GDKR(torch.nn.Module):
         for batch in batches:
             amp = self.amp.clone().requires_grad_()
             freq = self.freq.clone().requires_grad_()
-            # err_proj = self.err_proj.clone().requires_grad_()
-            res_proj = self.res_proj.clone().requires_grad_()
+            phase = self.phase.clone().requires_grad_()
             self.amp_grad.mul_(self.momentum)
             self.freq_grad.mul_(self.momentum)
-            # self.err_proj_grad.mul_(self.momentum)
-            self.res_proj_grad.mul_(self.momentum)
+            self.phase_grad.mul_(self.momentum)
 
-            t_batch, z_batch, x_batch = (
-                self.t_memory[batch], self.memory[batch], self.feat_memory[batch])
-            z_ = self._evaluate(t_batch, amp, freq, self.bias)
+            t_batch, z_batch = (
+                self.t_memory[batch], self.memory[batch])
+            z_ = self._evaluate(t_batch, amp, freq, phase)
             # print(t.shape, x.shape, x_.shape)
 
             # amp penalty for sparsity
@@ -370,35 +398,9 @@ class GDKR(torch.nn.Module):
             # TODO: harmonicity loss?
             # print(f0.shape, self.freq.shape)
 
-            # residual estimation from feature
-            # resid_ = self.get_resid(x_batch, z_.detach(), res_proj)
-            resid_ = self.get_resid(x_batch, z_, res_proj)
-            # print(resid_.abs().max())
-            z_ = z_.detach() + resid_
-            res_loss = (z_batch - z_).abs().sum(-1).mean()
-            # weight decay
-            res_loss = res_loss + self.res_proj.abs().sum() * self.weight_decay
-
-            loss = loss + res_loss * self.mm_lr
-
-            # # error estimation
-            # err_ = self.get_err(z, err_proj)
-            # err_loss = ((z_batch - z_).pow(2) - err_).abs().sum(-1).mean()
-            # err_loss = err_loss + self.err_proj.abs().sum() * self.weight_decay
-
-            # loss = loss + err_loss * 1e-3
-
-            # loss = loss + (err.pow(2) - err_).pow(2).sum(-1).mean()
-
-            # ag, fg, eg, rg = torch.autograd.grad(
-            #     [loss], [amp, freq, err_proj, res_proj],
-            #     )
-            ag, fg, rg = torch.autograd.grad(
-                [loss], [amp, freq, res_proj],
+            ag, fg, pg = torch.autograd.grad(
+                [loss], [amp, freq, phase],
                 )
-            # ag, fg = torch.autograd.grad(
-            #     [loss], [amp, freq],
-            #     )
 
             if torch.jit.isinstance(ag, torch.Tensor):
                 ag = ag / (torch.linalg.vector_norm(ag.flatten()) + 1)
@@ -408,16 +410,228 @@ class GDKR(torch.nn.Module):
                 fg = fg / (torch.linalg.vector_norm(fg.flatten()) + 1)
                 self.freq_grad.add_(fg)
                 self.freq.sub_(self.freq_grad*self.lr)
-            # if torch.jit.isinstance(eg, torch.Tensor):
-            #     eg = eg / (torch.linalg.vector_norm(eg.flatten()) + 1)
-            #     self.err_proj_grad.add_(eg)
-            #     self.err_proj.sub_(self.err_proj_grad*self.lr)
-            if torch.jit.isinstance(rg, torch.Tensor):
-                # print(rg.abs().max())
-                rg = rg / (torch.linalg.vector_norm(rg.flatten()) + 1)
-                self.res_proj_grad.add_(rg)
-                self.res_proj.sub_(self.res_proj_grad*self.lr)
-        
+            if torch.jit.isinstance(pg, torch.Tensor):
+                pg = pg / (torch.linalg.vector_norm(pg.flatten()) + 1)
+                self.phase_grad.add_(pg)
+                self.phase.sub_(self.phase_grad*self.lr)
+                self.phase.remainder_(1.0)
+
+
+# class GDKRR(torch.nn.Module):
+#     """Gradient Descent Kernel Regression with Residual prediction"""
+#     n_func:int
+#     lr_start:float
+#     lr_decay:float
+#     lr:float
+#     amp_decay:float
+#     momentum:float
+#     n:int
+#     batch_size:int
+#     data_size:int
+#     def __init__(self, 
+#             n_feat:int, n_target:int, memory_size:int=4096, n_func:int=32):
+#         super().__init__()
+#         self.n_func = n_func
+#         self.mem_size = memory_size
+#         self.lr_start = 1.0
+#         self.lr_decay = 0.977
+#         self.weight_decay = 1e-2
+#         # self.amp_decay = 1e-1
+#         self.amp_decay = 1e-2
+#         # self.amp_decay = 1e-3
+#         self.mm_lr = 3e-2
+#         self.n_hidden = 128
+#         self.n = 32#64
+#         self.batch_size = 16
+#         self.momentum = 0.85
+#         self.data_size = 0
+#         self.lr = self.lr_start
+#         # freq_per_func = n_target
+#         freq_per_func = 1
+#         # parameters: phase, frequency, amplitude of N periodic functions
+#         self.register_buffer('memory', torch.empty(memory_size, n_target))
+#         self.register_buffer('t_memory', torch.empty(memory_size, dtype=torch.long))
+#         self.register_buffer('feat_memory', torch.empty(memory_size, n_feat))
+#         self.register_buffer('amp', torch.empty(self.n_func, n_target, dtype=torch.complex64))
+#         # self.register_buffer('freq', torch.empty(self.n_func, 1))
+#         self.register_buffer('freq', torch.empty(self.n_func, freq_per_func))
+#         self.register_buffer('center_freq', 
+#             torch.linspace(0.01, 0.99, self.n_func)[:,None].logit())
+#         self.register_buffer('ih_proj', torch.empty(n_feat+n_target, self.n_hidden))
+#         self.register_buffer('h_bias', torch.empty(self.n_hidden))
+#         self.register_buffer('hr_proj', torch.empty(self.n_hidden, n_target))
+#         self.register_buffer('feat_mean', torch.empty(n_feat))
+#         self.register_buffer('bias', torch.empty(n_target))
+
+#         self.register_buffer('amp_grad', torch.empty(self.n_func, n_target, dtype=torch.complex64))
+#         self.register_buffer('freq_grad', torch.empty(self.n_func, freq_per_func))
+#         self.register_buffer('ih_proj_grad', torch.empty_like(self.ih_proj))
+#         self.register_buffer('hr_proj_grad', torch.empty_like(self.hr_proj))
+#         self.register_buffer('h_bias_grad', torch.empty_like(self.h_bias))
+
+#         self.reset()
+
+#     def reset(self):
+#         self.data_size = 0
+#         self.lr = self.lr_start
+#         self.amp_grad.zero_()
+#         self.freq_grad.zero_()
+#         self.ih_proj[:] = torch.randn_like(self.ih_proj).mul(self.ih_proj.shape[0]**-0.5)
+#         self.hr_proj[:] = torch.randn_like(self.hr_proj).mul(self.hr_proj.shape[0]**-0.5 * 1e-1)
+#         self.h_bias.zero_()
+#         self.amp.fill_(1/self.n_func**0.5)
+#         # self.freq[:] = torch.linspace(0.01, 0.99, self.n_func)[:,None].logit()
+#         self.freq.zero_()
+#         self.bias.zero_()
+#         self.feat_mean.zero_()
+#         self.ih_proj_grad.zero_()
+#         self.hr_proj_grad.zero_()
+#         self.h_bias_grad.zero_()
+
+#     def get_amp(self, amp):
+#         # return (amp.exp() + 1).log()
+#         # return amp.abs()
+#         return amp
+#         # return torch.nn.functional.relu(amp)
+
+#     def get_freq(self, freq):
+#         freq = self.center_freq + freq.tanh()*64/self.n_func
+#         return freq.sigmoid()/2
+    
+#     def get_resid(self, x, z, ih_proj, h_bias, hr_proj):
+#         h = torch.cat((x-self.feat_mean, z-self.bias), -1) @ ih_proj + h_bias
+#         h = h.tanh()
+#         r = h @ hr_proj
+#         # r = r / (r.abs() + 1)
+#         return r
+
+#     @torch.jit.export
+#     def evaluate(self, t):
+#         return self._evaluate(t, self.amp, self.freq, self.bias)
+
+#     def _evaluate(self, t, amp, freq, bias):
+#         # t: Tensor[batch]
+#         t = t[:,None,None]
+#         # Tensor[batch, basis, target]
+#         a = self.get_amp(amp)
+#         fr = self.get_freq(freq)
+#         # z = (((t * fr + p) * 2 * math.pi).sin() * a).sum(1) / self.n_func**0.5
+#         z = ((t * fr * 2j * math.pi).exp() * a).real.sum(1) / self.n_func**0.5
+#         # Tensor[batch, target]
+#         z = z + bias
+#         return z
+
+#     def sample_wedge(self, n:int):
+#         r = torch.rand(2,n)
+#         return (r.sum(0) - 1).abs()
+
+#     @torch.jit.export
+#     def predict(self, t:Union[torch.Tensor, int], x, temp:float=0.0):
+#         z = self.evaluate(torch.full((1,), float(t)))[0]
+#         z = z + self.get_resid(x, z, self.ih_proj, self.h_bias, self.hr_proj)
+#         return z
+
+#     @torch.jit.export
+#     def finalize(self):
+#         pass
+#         # print(self.get_freq(self.freq))
+
+#     @torch.jit.export
+#     def partial_fit(self, t:int, x, z):
+
+#         write_idx = self.data_size % self.mem_size
+#         # print(write_idx, self.mem_size)
+#         self.memory[write_idx] = z
+#         self.feat_memory[write_idx] = x
+#         self.t_memory[write_idx] = t
+#         self.data_size += 1
+
+#         self.lr *= self.lr_decay
+#         # print(self.lr)
+
+#         # compute target / feature mean exactly
+#         n = self.data_size
+#         self.bias[:] = self.bias * n/(n+1) + z/(n+1)
+#         self.feat_mean[:] = self.feat_mean * n/(n+1) + x/(n+1)
+
+#         # TODO: crazy idea: resample everything to noninteger t for experience replay?
+#         i = self.data_size - 1
+#         ts = i - (self.sample_wedge(self.n) * min(i, self.mem_size)).long()
+#         ts = ts % self.mem_size
+
+#         # print(samps)
+#         batches = ts.chunk(self.n//self.batch_size)
+#         for batch in batches:
+#             amp = self.amp.clone().requires_grad_()
+#             freq = self.freq.clone().requires_grad_()
+#             ih_proj = self.ih_proj.clone().requires_grad_()
+#             h_bias = self.h_bias.clone().requires_grad_()
+#             hr_proj = self.hr_proj.clone().requires_grad_()
+#             self.amp_grad.mul_(self.momentum)
+#             self.freq_grad.mul_(self.momentum)
+#             self.ih_proj_grad.mul_(self.momentum)
+#             self.h_bias_grad.mul_(self.momentum)
+#             self.hr_proj_grad.mul_(self.momentum)
+
+#             t_batch, z_batch, x_batch = (
+#                 self.t_memory[batch], self.memory[batch], self.feat_memory[batch])
+#             z_ = self._evaluate(t_batch, amp, freq, self.bias)
+#             # print(t.shape, x.shape, x_.shape)
+
+#             # amp penalty for sparsity
+#             loss = self.get_amp(amp).abs().sqrt().sum() * self.amp_decay
+
+#             # loss with just periodic functions
+#             loss = loss + (z_batch - z_).abs().sum(-1).mean()
+
+#             # TODO: harmonicity loss?
+#             # print(f0.shape, self.freq.shape)
+
+#             # residual estimation from feature
+#             # resid_ = self.get_resid(x_batch, z_.detach(), res_proj)
+#             resid_ = self.get_resid(x_batch, z_, ih_proj, h_bias, hr_proj)
+#             # # print(resid_.abs().max())
+#             z_ = z_+resid_
+#             # z_ = z_.detach() + resid_
+#             res_loss = (z_batch - z_).abs().sum(-1).mean()
+#             # # weight decay
+#             res_loss = res_loss + (
+#                 self.ih_proj.abs().sum()
+#                 + self.h_bias.abs().sum()
+#                 + self.hr_proj.abs().sum()
+#              ) * self.weight_decay
+            
+#             loss = loss + res_loss * self.mm_lr
+
+#             ag, fg, ihg, hbg, hrg = torch.autograd.grad(
+#                 [loss], [amp, freq, ih_proj, h_bias, hr_proj],
+#                 )
+
+#             if torch.jit.isinstance(ag, torch.Tensor):
+#                 ag = ag / (torch.linalg.vector_norm(ag.flatten()) + 1)
+#                 self.amp_grad.add_(ag)
+#                 self.amp.sub_(self.amp_grad*self.lr)
+#                 print(self.amp)
+#             if torch.jit.isinstance(fg, torch.Tensor):
+#                 fg = fg / (torch.linalg.vector_norm(fg.flatten()) + 1)
+#                 self.freq_grad.add_(fg)
+#                 self.freq.sub_(self.freq_grad*self.lr)
+#             if torch.jit.isinstance(ihg, torch.Tensor):
+#                 # print(ihg.abs().max())
+#                 ihg = ihg / (torch.linalg.vector_norm(ihg.flatten()) + 1)
+#                 self.ih_proj_grad.add_(ihg)
+#                 self.ih_proj.sub_(self.ih_proj_grad*self.lr)
+#             if torch.jit.isinstance(hbg, torch.Tensor):
+#                 # print(hbg.abs().max())
+#                 hbg = hbg / (torch.linalg.vector_norm(hbg.flatten()) + 1)
+#                 self.h_bias_grad.add_(hbg)
+#                 self.h_bias.sub_(self.h_bias_grad*self.lr)
+#             if torch.jit.isinstance(hrg, torch.Tensor):
+#                 # print(hrg.abs().max())
+#                 hrg = hrg / (torch.linalg.vector_norm(hrg.flatten()) + 1)
+#                 self.hr_proj_grad.add_(hrg)
+#                 self.hr_proj.sub_(self.hr_proj_grad*self.lr)
+
 
 def fit_model(X, Y, cls, **kw):
     """create a model, fit to data, print timing and return the predictor"""
@@ -426,20 +640,27 @@ def fit_model(X, Y, cls, **kw):
     n_target = Y.shape[-1]
 
     model = cls(n_feat, n_target, **kw)
-    
+
+    model.partial_fit(0, torch.randn(n_feat), torch.randn(n_target))
+    model.reset()
     model = torch.jit.script(model)
-    
+    # torch.jit.save(model, 'test.ts')
+    # model = torch.jit.load('test.ts')
+
     ts = []
 
     for t,x,y in zip(T,X,Y):
         t_ns = time.time_ns()
+        # print(t, x, y)
+        # print(model.amp, model.amp_grad)
         model.partial_fit(t,x,y)
         ts.append(time.time_ns() - t_ns)
+        # break
 
     t_ns = time.time_ns()
     model.finalize()
 
-    ts = torch.tensor(ts).float()[1:]
+    ts = torch.tensor(ts).float()#[1:]
 
     print(f'partial_fit time (mean): {torch.mean(ts)*1e-6} ms')
     print(f'partial_fit time (99%): {torch.quantile(ts, 0.99)*1e-6} ms')
