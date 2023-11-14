@@ -2,20 +2,25 @@ import torch
 from typing import List
     
 
-class Chain(torch.nn.Module):
-    def __init__(self, layers:List[torch.nn.Module]):
-        super().__init__()
-        self.ms = torch.nn.ModuleList(layers)
-        for m in self.ms:
-            self.n_feature = m.n_feature
-    def feed(self, x, offset:int=0):
-        for m in self.ms:
-            x = m.feed(x, offset)
-        return x
-    def reset(self):
-        for m in self.ms:
-            m.reset()
-    
+# class Chain(torch.nn.Module):
+#     def __init__(self, layers:List[torch.nn.Module]):
+#         super().__init__()
+#         self.ms = torch.nn.ModuleList(layers)
+#         for m in self.ms:
+#             self.n_feature = m.n_feature
+#     def feed(self, x, offset:int=0):
+#         for m in self.ms:
+#             x = m.feed(x, offset)
+#         return x
+#     def reset(self):
+#         for m in self.ms:
+#             m.reset()
+#     def replace(self, other:"Chain"):
+#         # for m,mo in zip(self.ms, other.ms):
+#         #     m.replace(mo)
+#         for i,m in enumerate(self.ms):
+#             m.replace(other.ms[i])
+
 class Slice(torch.nn.Module):
     def __init__(self, start:int, end:int):
         super().__init__()
@@ -26,21 +31,76 @@ class Slice(torch.nn.Module):
         pass
     def feed(self, x, offset:int=0):
         return x[self.start:self.end]
+    def replace(self, other:"Slice"):
+        pass
     
-class Cat(torch.nn.Module):
-    def __init__(self, ms:List[torch.nn.Module]):
+
+class Cat2(torch.nn.Module):
+    def __init__(self, a:torch.nn.Module, b:torch.nn.Module):
         super().__init__()
-        self.ms = torch.nn.ModuleList(ms)
-        self.n_feature = sum(m.n_feature for m in ms)
+        self.a = a
+        self.b = b
+        # self.ms = torch.nn.ModuleDict({str(k):m for k,m in enumerate(ms)})
+        self.n_feature = a.n_feature + b.n_feature
     def reset(self):
-        for m in self.ms:
-            m.reset()
+        self.a.reset()
+        self.b.reset()
     def feed(self, x, offset:int=0):
-        xs = []
-        for m in self.ms:
-            xs.append(m.feed(x, offset))
-        return torch.cat(xs, -1)
+        return torch.cat((self.a.feed(x, offset), self.b.feed(x, offset)), -1)
+    def replace(self, other:"Cat2"):
+        self.a.replace(other.a)
+        self.b.replace(other.b)
+
+class Chain2(torch.nn.Module):
+    def __init__(self, a:torch.nn.Module, b:torch.nn.Module):
+        super().__init__()
+        self.a = a
+        self.b = b
+        # self.ms = torch.nn.ModuleDict({str(k):m for k,m in enumerate(ms)})
+        self.n_feature = b.n_feature
+    def reset(self):
+        self.a.reset()
+        self.b.reset()
+    def feed(self, x, offset:int=0):
+        return self.b.feed(self.a.feed(x, offset), offset)
+    def replace(self, other:"Chain2"):
+        self.a.replace(other.a)
+        self.b.replace(other.b)
+
+def Cat(ms:List[torch.nn.Module]):
+    if len(ms)==1:
+        return ms[0]
+    else:
+        return Cat2(ms[0], Cat(ms[1:]))
     
+def Chain(ms:List[torch.nn.Module]):
+    if len(ms)==1:
+        return ms[0]
+    else:
+        return Chain2(ms[0], Chain(ms[1:]))
+# class Cat(torch.nn.Module):
+#     def __init__(self, ms:List[torch.nn.Module]):
+#         super().__init__()
+#         self.n = len(ms)
+#         self.ms = torch.nn.ModuleList(ms)
+#         # self.ms = torch.nn.ModuleDict({str(k):m for k,m in enumerate(ms)})
+#         self.n_feature = sum(m.n_feature for m in ms)
+#     def reset(self):
+#         for m in self.ms:
+#             m.reset()
+#     def feed(self, x, offset:int=0):
+#         xs = []
+#         for m in self.ms:
+#             xs.append(m.feed(x, offset))
+#         return torch.cat(xs, -1)
+#     def replace(self, other:"Cat"):
+#         oms:torch.nn.ModuleList = other.ms
+#         for i,m in enumerate(self.ms):
+#             for j,mo in enumerate(other.ms):
+#                 if i==j:
+#                     m.replace(mo)
+            
+
 class Quadratic(torch.nn.Module):
     def __init__(self, m:torch.nn.Module):
         super().__init__()
@@ -51,6 +111,8 @@ class Quadratic(torch.nn.Module):
     def feed(self, x, offset:int=0):
         x = self.m.feed(x, offset)
         return (x * x[...,None]).view(-1)
+    def replace(self, other:"Quadratic"):
+        self.m.replace(other.m)
     
 class DividedQuadratic(torch.nn.Module):
     def __init__(self, m:torch.nn.Module):
@@ -64,17 +126,8 @@ class DividedQuadratic(torch.nn.Module):
         return (torch.cat((
             torch.nn.functional.softplus(x), torch.nn.functional.softplus(-x)
             )) * x[...,None]).view(-1)
-# class Quadratic(torch.nn.Module):
-#     def __init__(self, m:torch.nn.Module):
-#         super().__init__()
-#         self.m = m
-#         self.n_feature = (m.n_feature)**2 + m.n_feature
-#     def reset(self):
-#         self.m.reset()
-#     def feed(self, x, offset:int=0):
-#         x = self.m.feed(x, offset)
-
-#         return torch.cat((x, (x * x[...,None]).view(-1)), -1)
+    def replace(self, other:"DividedQuadratic"):
+        self.m.replace(other.m)
 
 
 class Window(torch.nn.Module):
@@ -99,6 +152,10 @@ class Window(torch.nn.Module):
 
     def reset(self):
         self.memory.zero_()
+
+    def replace(self, other:"Window"):
+        self.memory[:] = other.memory
+        self.record_index = other.record_index
 
     def wrap(self, idx:int):
         return idx % self.n_memory
@@ -164,6 +221,9 @@ class RNN(torch.nn.Module):
         self.init(self.ih)
         self.init(self.hh)
         self.init(self.ho)
+
+    def replace(self, other:"Window"):
+        self.hidden[:] = other.hidden
 
     def wrap(self, idx:int):
         return idx % self.n_memory

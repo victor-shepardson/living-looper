@@ -39,27 +39,92 @@ from typing import Union
 #         y = self.m.predict(t, x-self.mu_x, temp=temp) + self.mu_y
 #         return y
 
+# NOTE: would be better to include a's prediction in the feature for b?
+class Residual(torch.nn.Module):
+    """wrap two models, with one predicting the residual of the other"""
+    def __init__(self, a:torch.nn.Module, b:torch.nn.Module):
+        super().__init__()
+        self.a = a
+        self.b = b
+    
+    @torch.jit.export
+    def reset(self):
+        self.a.reset()
+        self.b.reset()
+
+    @torch.jit.export
+    def finalize(self):
+        self.a.finalize()
+        self.b.finalize()
+
+    @torch.jit.export
+    def partial_fit(self, t:int, x, y):
+        y_ = self.a.predict(t, x)
+        self.a.partial_fit(t, x, y)
+        self.b.partial_fit(t, x, y-y_)
+
+    @torch.jit.export
+    def predict(self, t:int, x, temp:float=0.5):
+        y = self.a.predict(t, x, temp=temp)
+        y = y + self.b.predict(t, x, temp=temp)
+        return y
+    
+class Residual2(torch.nn.Module):
+    """wrap two models, with one predicting the residual of the other.
+    this version provides the prediction of the first as a feature to the second.
+    """
+    def __init__(self, a:torch.nn.Module, cls:torch.nn.Module, n_feat:int, n_target:int, **kw):
+        super().__init__()
+        self.a = a
+        self.b = cls(n_feat+n_target, n_target, **kw)
+    
+    @torch.jit.export
+    def reset(self):
+        self.a.reset()
+        self.b.reset()
+
+    @torch.jit.export
+    def finalize(self):
+        self.a.finalize()
+        self.b.finalize()
+
+    @torch.jit.export
+    def partial_fit(self, t:int, x, y):
+        y_ = self.a.predict(t, x)
+        self.a.partial_fit(t, x, y)
+        self.b.partial_fit(t, torch.cat((x, y_), -1), y-y_)
+
+    @torch.jit.export
+    def predict(self, t:int, x, temp:float=0.5):
+        y_ = self.a.predict(t, x, temp=temp)
+        y = y_ + self.b.predict(t, torch.cat((x, y_), -1), temp=temp)
+        return y
+
 
 class Moments(torch.nn.Module):
     """wrap another model to predict y, y**2, (y**3),
     and use these to estimate variance (skew) conditioned on input features.
     sample predictions from a (skew) normal distribution.
     """
-    def __init__(self, cls:type, n_feat:int, n_target:int, n_moment=3, **kw):
+    def __init__(self, cls:type, n_feat:int, n_target:int, n_moment=2, **kw):
         super().__init__()
         self.m = cls(n_feat, n_target*n_moment, **kw)
         self.n_moment = n_moment
 
+    @torch.jit.export
     def reset(self):
         self.m.reset()
 
+    @torch.jit.export
     def finalize(self):
         self.m.finalize()
 
+    @torch.jit.export
     def partial_fit(self, t:int, x, y):
         y = torch.cat([y**m for m in range(1, self.n_moment+1)])
         self.m.partial_fit(t, x, y)
 
+    @torch.jit.export
     def predict(self, t:int, x, temp:float=0.5):
         y = self.m.predict(t, x, temp=0.0)
 
@@ -82,9 +147,9 @@ class Moments(torch.nn.Module):
                 alpha = delta / (1 - delta2).sqrt()
                 omega = sigma / (1 - 2/math.pi*delta2).sqrt()
                 xi = mu - omega*delta*(2/math.pi)**0.5
-                print('mu', mu)
-                print('sigma', sigma)
-                print('gamma', gamma)
+                # print('mu', mu)
+                # print('sigma', sigma)
+                # print('gamma', gamma)
                 # print(xi, omega, alpha)
                 y = randn_skew(xi, omega, alpha)
 
@@ -103,7 +168,9 @@ def randn_skew(loc, scale, alpha):
 
 class ILR(torch.nn.Module):
     """
-    Incremental Linear Regression
+    Incremental Linear Regression.
+
+    Complexity is N**2 in the feature size
     """
     n:int
     def __init__(self, n_feat:int, n_target:int):
@@ -115,6 +182,8 @@ class ILR(torch.nn.Module):
         self.register_buffer('w', torch.empty(n_feat, n_target))
         self.register_buffer('mu_x', torch.empty(n_feat))
         self.register_buffer('mu_y', torch.empty(n_target))
+
+        self.reset()
 
     def reset(self):
         self.w.zero_()
@@ -167,7 +236,10 @@ class IPLS(torch.nn.Module):
     (https://ieeexplore.ieee.org/document/9423374/)
     for multivariate targets.
     improved numerical stability and performance by using an inner loop, 
-    burn-in steps, and a prior on the data means and score norm. 
+    burn-in steps, and a prior on the score norm. 
+
+    Complexity is n_latent * (n_target + n_feat)
+    (plus the cost of pinv for [n_target x n_latent])
     """
     def __init__(self,
         n_feat:int,
@@ -294,7 +366,9 @@ class IPLS(torch.nn.Module):
                 self.Cz, 2, 1, keepdim=True)
             b = self.bz / self.t_sq_sum.sqrt()
             # print(self.P)
-            self.H[:] = torch.linalg.pinv(self.P) * b @ C
+            # self.H[:] = torch.linalg.pinv(self.P) * b @ C
+            self.H[:] = torch.linalg.lstsq(self.P, b[:,None]*C).solution
+
             # print(self.H)
         # print(self.mu_y.chunk(3, -1))
 
@@ -689,16 +763,16 @@ class GDKR(torch.nn.Module):
 #                 self.hr_proj.sub_(self.hr_proj_grad*self.lr)
 
 
-def fit_model(X, Y, cls, **kw):
+def fit_model(X, Y, model_cls, **kw):
     """create a model, fit to data, print timing and return the predictor"""
     T = torch.arange(X.shape[0])
     n_feat = X.shape[-1]
     n_target = Y.shape[-1]
 
-    model = cls(n_feat, n_target, **kw)
+    model = model_cls(n_feat, n_target, **kw)
 
-    model.partial_fit(0, torch.randn(n_feat), torch.randn(n_target))
-    model.reset()
+    # model.partial_fit(0, torch.randn(n_feat), torch.randn(n_target))
+    # model.reset()
     model = torch.jit.script(model)
     # torch.jit.save(model, 'test.ts')
     # model = torch.jit.load('test.ts')
@@ -708,7 +782,7 @@ def fit_model(X, Y, cls, **kw):
     for t,x,y in zip(T,X,Y):
         t_ns = time.time_ns()
         # print(t, x, y)
-        # print(model.amp, model.amp_grad)
+        # print(model.w)
         model.partial_fit(t,x,y)
         ts.append(time.time_ns() - t_ns)
         # break

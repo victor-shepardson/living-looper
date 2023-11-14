@@ -348,20 +348,8 @@ class LivingLooper(nn.Module):
             if i==j:
                 if self.verbose>0:
                     print(f'starting {i}...')
-                # loop.rep = self.loops[0].rep.clone()
-                print('WARNING: placeholder start_loop')
-                # loop.rep.memory[:] = self.loops[0].rep.memory
-                # loop.rep.record_index = self.loops[0].rep.record_index
-                loop.rep.ms[0].ms[1].memory[:] = self.loops[0].rep.ms[0].ms[1].memory
-                loop.rep.ms[1].ms[1].memory[:] = self.loops[0].rep.ms[1].ms[1].memory
-                loop.rep.ms[0].ms[1].record_index = self.loops[0].rep.ms[0].ms[1].record_index
-                loop.rep.ms[1].ms[1].record_index = self.loops[0].rep.ms[1].ms[1].record_index
-                # loop.rep.ms[0].m.memory[:] = self.loops[0].rep.ms[0].m.memory
-                # loop.rep.ms[1].memory[:] = self.loops[0].rep.ms[1].memory
-                # loop.rep.ms[0].m.record_index = self.loops[0].rep.ms[0].m.record_index
-                # loop.rep.ms[1].record_index = self.loops[0].rep.ms[1].record_index
-                loop.store.memory = dict(self.loops[0].store.memory)
-
+                # replace the target loop's feature retroactively with the input feature
+                loop.replace(self.loops[0])
 
     def finalize_loop(self, i:int):
         """

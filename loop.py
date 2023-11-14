@@ -3,8 +3,8 @@ from typing import Dict
 import torch
 from torch.nn import ModuleList
 
-from model import ILR, IPLS, GDKR, Moments
-from representation import Window, RNN, DividedQuadratic, Quadratic, Cat, Chain, Slice
+from model import ILR, IPLS, GDKR, Moments, Residual2
+from representation import Window, RNN, DividedQuadratic, Cat, Chain, Slice
 from transform import LinQuad, Tanh, Id
 
 class FeatureStore(torch.nn.Module):
@@ -20,6 +20,10 @@ class FeatureStore(torch.nn.Module):
     def reset(self):
         # print('store reset')
         self.memory.clear()
+
+    def replace(self, other:"FeatureStore"):
+        # self.memory = dict(other.memory)
+        self.memory.update(other.memory)
 
     def add(self, step:int, feat):
         for k in list(self.memory):
@@ -60,12 +64,16 @@ class Loop(torch.nn.Module):
 
         # self.rep = RNN(n_latent, 1024, 256)
 
-        self.rep = Window(n_latent, n_context)
+        # self.rep = Window(n_latent, n_context)
 
         self.rep = Cat([
             Chain([Slice(0,3), Window(3, n_context)]),
             Chain([Slice(3,n_latent), Window(n_latent-3, 3)]),
         ])
+        # self.rep = Cat2(
+        #     Chain2(Slice(0,3), Window(3, n_context)),
+        #     Chain2(Slice(3,n_latent), Window(n_latent-3, 3)),
+        # )
 
         # self.rep = Cat(ModuleList((Quadratic(self.rep), self.rep)))
         # self.rep = Cat(ModuleList((
@@ -113,6 +121,10 @@ class Loop(torch.nn.Module):
         self.rep.reset() # should this get reset?
         self.z_min.fill_(torch.inf)
         self.z_max.fill_(-torch.inf)
+
+    def replace(self, other:"Loop"):
+        self.rep.replace(other.rep)
+        self.store.replace(other.store)
 
     def partial_fit(self, t:int, x, z):
         """fit raw feature x to raw target z"""
