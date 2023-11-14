@@ -101,6 +101,62 @@ def randn_skew(loc, scale, alpha):
     return u1
 
 
+class ILR(torch.nn.Module):
+    """
+    Incremental Linear Regression
+    """
+    n:int
+    def __init__(self, n_feat:int, n_target:int):
+        super().__init__()
+        self.n = 0
+        self.n_feat = n_feat
+        self.n_target = n_target
+        self.register_buffer('P', torch.empty(n_feat, n_feat))
+        self.register_buffer('w', torch.empty(n_feat, n_target))
+        self.register_buffer('mu_x', torch.empty(n_feat))
+        self.register_buffer('mu_y', torch.empty(n_target))
+
+    def reset(self):
+        self.w.zero_()
+        self.P[:] = torch.eye(self.n_feat)*100
+        self.mu_x.zero_()
+        self.mu_y.zero_()
+
+    @torch.jit.export
+    def finalize(self):
+        pass
+
+    @torch.jit.export
+    def partial_fit(self, t:int, x, y):
+        """
+        Args:
+            t: unused
+            x: Tensor[n_feat]
+            y: Tensor[n_target]
+        """
+        n = self.n
+        self.mu_x[:] = self.mu_x * n/(n+1) + x/(n+1)
+        self.mu_y[:] = self.mu_y * n/(n+1) + y/(n+1)
+        self.n += 1
+
+        x = x - self.mu_x
+        y = y - self.mu_y
+
+        x = x[:,None] # [n_feat, 1]
+        y = y[None] # [1, n_target]
+
+        Px = self.P@x # n_feat, 1
+        k = Px / (1 + x.T@Px) # n_feat, 1
+        self.P.sub_(k @ Px.T) # n_feat, n_feat
+        self.w.add_(k * (y - x.T@self.w))
+        #                       \1, n_target/
+        #              \  n_feat, n_target /
+
+    @torch.jit.export
+    def predict(self, t:int, x, temp:float=0.0):
+        return (x - self.mu_x) @ self.w + self.mu_y
+
+
 class IPLS(torch.nn.Module):
     """
     Incremental Partial Least Squares

@@ -110,16 +110,17 @@ class LivingLooper(nn.Module):
         limit_margin_t = torch.tensor(limit_margin)
 
         # create Loops
+        # loop 0 is the input feature extractor
         self.loops = nn.ModuleList(Loop(
             i, n_loops, n_context, self.n_latent, latency_correct, 
             limit_margin_t, verbose,
-        ) for i in range(n_loops))
+        ) for i in range(n_loops+1))
 
         self.register_buffer('mask', 
-            torch.empty(2, n_loops, requires_grad=False))
+            torch.empty(2, n_loops+1, requires_grad=False))
     
         # auto trigger
-        self.register_buffer("zs", torch.zeros(1, n_loops, self.n_latent))
+        self.register_buffer("zs", torch.zeros(1, n_loops+1, self.n_latent))
         self.register_buffer("landmark_z", torch.zeros(self.n_latent))
         
         self.reset()
@@ -176,7 +177,7 @@ class LivingLooper(nn.Module):
             # print(z)
 
         if (loop_index!=self.prev_loop_index and loop_index < 0):
-            self.reset_loop(-loop_index - 1)
+            self.reset_loop(-loop_index)
 
         # this is the previous *input* not necessarily previous actual
         self.prev_loop_index = loop_index
@@ -196,21 +197,24 @@ class LivingLooper(nn.Module):
                 # auto-set a new loop index
 
                 # choose the (other) loop with current medium-similar z
-                idx = self.loop_index-1
+                idx = self.loop_index
                 others = self.zs[0].clone()
 
                 if auto==1:
+                    others[0] = np.inf
                     if idx>=0:
                         others[idx] = np.inf
-                    i = 1+int(torch.linalg.vector_norm(others - z, 2, -1).argmin().item())
+                    i = int(torch.linalg.vector_norm(others - z, 2, -1).argmin().item())
                 elif auto==2:
+                    others[0] = z
                     if idx>=0:
                         others[idx] = z
-                    i = 1+int(torch.linalg.vector_norm(others - z, 2, -1).median(0).indices.item())
+                    i = int(torch.linalg.vector_norm(others - z, 2, -1).median(0).indices.item())
                 else:
+                    others[0] = z
                     if idx>=0:
                         others[idx] = z
-                    i = 1+int(torch.linalg.vector_norm(others - z, 2, -1).argmax().item())
+                    i = int(torch.linalg.vector_norm(others - z, 2, -1).argmax().item())
 
                 # i = int(torch.randint(0,self.n_loops+1,(1,)).item())
                 # print(zd, i)
@@ -240,7 +244,7 @@ class LivingLooper(nn.Module):
         # alternatively, require the ability for features to 'roll back' one step?
         # or, have a separate rep/store for the input(s)?
         for l,loop in enumerate(self.loops):
-            if (i-1)==l:
+            if l in (0, i):
                 loop.feed(self.step-self.latency_correct, z)
 
         # print(i, i_prev, self.loop_length)
@@ -248,28 +252,38 @@ class LivingLooper(nn.Module):
             if i_prev > 0: # previously on a loop
                 # if self.record_length >= self.min_loop: # and it was long enough
                 # convert to 0-index here
-                self.finalize_loop(i_prev-1)
+                self.finalize_loop(i_prev)
             if i>0: # starting a new loop recording
                 self.record_length = 0
-                self.reset_loop(i - 1)
+                self.reset_loop(i)
+                self.start_loop(i)
                 if thru:
-                    self.mask[1,i-1] = 1
-                    print('unmask')
+                    # print('unmask')
+                    self.mask[1,i] = 1
             self.loop_index = i
 
         # fit active loop / predict other loops
-        for l,loop in enumerate(self.loops):            
-            if (i-1)==l:
-                t = self.step - self.latency_correct
-                feat = self.get_feature(l, self.latency_correct)
-                zl = z
-                loop.partial_fit(t, feat, z)
-                # in this case, feed happened above
-            else:
-                feat = self.get_feature(l, 1)
-                zl = loop.predict(self.step, feat)
-                loop.feed(self.step, zl)
-            self.zs[:,l] = zl
+        for l,loop in enumerate(self.loops):
+        # for l,loop in enumerate(self.loops[1:],1):
+            # NOTE: slicing self.loops is BUGGED here in torchscript?
+            # print(l, id(loop), loop.index)
+            if l > 0:
+                if i==l:
+                    if self.verbose>1:
+                        print(f'--fitting loop {l}--')
+                    t = self.step - self.latency_correct
+                    feat = self.get_feature(l, self.latency_correct + 1)
+                    zl = z
+                    loop.partial_fit(t, feat, z)
+                    # in this case, feed happened above
+                else:
+                    if self.verbose>1:
+                        print(f'--predicting loop {l}--')
+                    feat = self.get_feature(l, 1)
+                    zl = loop.predict(self.step, feat)
+                    loop.feed(self.step, zl)
+                self.zs[:,l] = zl
+                # print('done')
 
         self.record_length += 1
 
@@ -278,16 +292,20 @@ class LivingLooper(nn.Module):
         # self.mask[:,0] = 1
         # self.mask[:,1:] = 0
 
+        if self.verbose>1:
+            print(f'--decoding...--')
         with torch.no_grad():
-            y = self.decode(self.zs.permute(1,2,0)) # loops, channels (1), time
+            y = self.decode(self.zs.permute(1,2,0)[1:]) # loops, channels (1), time
+        if self.verbose>1:
+            print(f'done')
 
         fade = torch.linspace(0,1,y.shape[2])
         mask = self.mask[1,:,None,None] * fade + self.mask[0,:,None,None] * (1-fade)
-        y = y * mask
+        y = y * mask[1:]
         self.mask[0] = self.mask[1]
 
 
-        return y, self.zs.permute(1,0,2)
+        return y, self.zs[:,1:].permute(1,0,2)
 
         # print(f'{self.loop_length}, {self.record_index}, {self.loop_index}')
 
@@ -307,7 +325,7 @@ class LivingLooper(nn.Module):
         return torch.cat([loop.get(
             step if (l==i) else 
             (step - self.latency_correct + 1)
-            ) for l,loop in enumerate(self.loops)
+            ) for l,loop in enumerate(self.loops[1:], 1)
         ])
 
     def reset_loop(self, i:int):
@@ -319,11 +337,31 @@ class LivingLooper(nn.Module):
         for j,loop in enumerate(self.loops): 
             if i==j:
                 if self.verbose>0:
-                    print(f'resetting {i+1}...')
+                    print(f'resetting {i}...')
                 loop.reset()
                 if self.verbose>0:
                     print(f'done')
         self.mask[1,i] = 0.
+
+    def start_loop(self, i:int):
+        for j,loop in enumerate(self.loops): 
+            if i==j:
+                if self.verbose>0:
+                    print(f'starting {i}...')
+                # loop.rep = self.loops[0].rep.clone()
+                print('WARNING: placeholder start_loop')
+                # loop.rep.memory[:] = self.loops[0].rep.memory
+                # loop.rep.record_index = self.loops[0].rep.record_index
+                loop.rep.ms[0].ms[1].memory[:] = self.loops[0].rep.ms[0].ms[1].memory
+                loop.rep.ms[1].ms[1].memory[:] = self.loops[0].rep.ms[1].ms[1].memory
+                loop.rep.ms[0].ms[1].record_index = self.loops[0].rep.ms[0].ms[1].record_index
+                loop.rep.ms[1].ms[1].record_index = self.loops[0].rep.ms[1].ms[1].record_index
+                # loop.rep.ms[0].m.memory[:] = self.loops[0].rep.ms[0].m.memory
+                # loop.rep.ms[1].memory[:] = self.loops[0].rep.ms[1].memory
+                # loop.rep.ms[0].m.record_index = self.loops[0].rep.ms[0].m.record_index
+                # loop.rep.ms[1].record_index = self.loops[0].rep.ms[1].record_index
+                loop.store.memory = dict(self.loops[0].store.memory)
+
 
     def finalize_loop(self, i:int):
         """
@@ -332,7 +370,7 @@ class LivingLooper(nn.Module):
             i: zero indexed loop
         """
         if self.verbose > 0:
-            print(f'finalize {i+1}')
+            print(f'finalize {i}')
         # work around quirk of torchscript
         # (can't index ModuleList except with literal)
         for j,loop in enumerate(self.loops): 
@@ -351,8 +389,8 @@ class LivingLooper(nn.Module):
         """
         feature encoder
         """
-        return self.model.encode(x)
-        # return self.model.encode(x, temp=0.0)
+        # return self.model.encode(x)
+        return self.model.encode(x, temp=0.0)
 
     def decode(self, z):
         """

@@ -3,8 +3,8 @@ from typing import Dict
 import torch
 from torch.nn import ModuleList
 
-from model import IPLS, GDKR, Moments
-from representation import Window, RNN, DividedQuadratic, Quadratic, Cat
+from model import ILR, IPLS, GDKR, Moments
+from representation import Window, RNN, DividedQuadratic, Quadratic, Cat, Chain, Slice
 from transform import LinQuad, Tanh, Id
 
 class FeatureStore(torch.nn.Module):
@@ -59,13 +59,19 @@ class Loop(torch.nn.Module):
         self.n_latent = n_latent
 
         # self.rep = RNN(n_latent, 1024, 256)
-        # self.rep = Window(n_latent, n_context)
+
+        self.rep = Window(n_latent, n_context)
+
+        self.rep = Cat([
+            Chain([Slice(0,3), Window(3, n_context)]),
+            Chain([Slice(3,n_latent), Window(n_latent-3, 3)]),
+        ])
 
         # self.rep = Cat(ModuleList((Quadratic(self.rep), self.rep)))
-        self.rep = Cat(ModuleList((
-            DividedQuadratic(Window(n_latent, 2)),
-            Window(n_latent, n_context)
-            )))
+        # self.rep = Cat(ModuleList((
+        #     DividedQuadratic(Window(n_latent, 1)),
+        #     Window(n_latent, n_context)
+        #     )))
 
         # this assumes all loops use the same (sized) feature --
         # would need multiple stages of init to allow otherwise
@@ -83,12 +89,17 @@ class Loop(torch.nn.Module):
 
         self.target_xform = LinQuad()
         self.feat_xform = Id()
-        # n_latent_ipls = 64
-        n_latent_ipls = n_latent
-        # self.model = IPLS(
-        #     n_feat=n_feature, n_target=n_latent, n_latent=n_latent_ipls)
-        self.model = Moments(IPLS,
-            n_feat=n_feature, n_target=n_latent, n_moment=2, n_latent=n_latent_ipls)
+        self.model = Moments(ILR,
+            n_feat=n_feature, n_target=n_latent, n_moment=2)
+        
+        # self.target_xform = LinQuad()
+        # self.feat_xform = Id()
+        # n_latent_ipls = 32
+        # # n_latent_ipls = n_latent
+        # # self.model = IPLS(
+        # #     n_feat=n_feature, n_target=n_latent, n_latent=n_latent_ipls)
+        # self.model = Moments(IPLS,
+        #     n_feat=n_feature, n_target=n_latent, n_moment=2, n_latent=n_latent_ipls)
 
         self.register_buffer('limit_margin', limit_margin)
         self.register_buffer('z_min', 
@@ -105,6 +116,8 @@ class Loop(torch.nn.Module):
 
     def partial_fit(self, t:int, x, z):
         """fit raw feature x to raw target z"""
+        if self.verbose > 1:
+            print('fit loop', self.index, 'step', t)
         self.z_min[:] = torch.minimum(self.z_min, z)
         self.z_max[:] = torch.maximum(self.z_max, z)
         # print('min', self.z_min, 'max', self.z_max)
@@ -135,17 +148,18 @@ class Loop(torch.nn.Module):
         offset = 0
         while (step+offset) in self.store.memory:
             if self.verbose > 1:
-                print('WARNING: feature already computed for loop', self.index+1, 'step', step+offset)
+                print('WARNING: feature already computed for loop', self.index, 'step', step+offset)
             offset += 1
 
         if self.verbose > 1:
-            print('feed loop', self.index+1, 'offset', offset, 'step', step)
+            print('feed loop', self.index, 'offset', offset, 'step', step)
         # TODO: could add logic to allow features which don't support rollback here
         # i.e. if feed returns None, don't add?
         self.store.add(step, self.rep.feed(z, offset))
 
+    @torch.jit.export
     def get(self, step:int):
         """get the feature for time `step`"""
         if self.verbose > 1:
-            print(f'get loop', self.index+1, 'step', step)
+            print(f'get loop', self.index, 'step', step)
         return self.store.get(step)

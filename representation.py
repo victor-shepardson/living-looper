@@ -3,23 +3,34 @@ from typing import List
     
 
 class Chain(torch.nn.Module):
-    def __init__(self, layers:List[torch.jit.ScriptModule]):
+    def __init__(self, layers:List[torch.nn.Module]):
         super().__init__()
-
-        self.layers = torch.nn.ModuleList(layers)
-
-        for l in self.layers:
-            self.n_feature = l.n_feature
-
-    def feed(self, x):
-        for l in self.layers:
-            x = l.feed(x)
+        self.ms = torch.nn.ModuleList(layers)
+        for m in self.ms:
+            self.n_feature = m.n_feature
+    def feed(self, x, offset:int=0):
+        for m in self.ms:
+            x = m.feed(x, offset)
         return x
+    def reset(self):
+        for m in self.ms:
+            m.reset()
+    
+class Slice(torch.nn.Module):
+    def __init__(self, start:int, end:int):
+        super().__init__()
+        self.start = start
+        self.end = end
+        self.n_feature = end - start
+    def reset(self):
+        pass
+    def feed(self, x, offset:int=0):
+        return x[self.start:self.end]
     
 class Cat(torch.nn.Module):
-    def __init__(self, ms:torch.nn.ModuleList):
+    def __init__(self, ms:List[torch.nn.Module]):
         super().__init__()
-        self.ms = ms
+        self.ms = torch.nn.ModuleList(ms)
         self.n_feature = sum(m.n_feature for m in ms)
     def reset(self):
         for m in self.ms:
@@ -99,7 +110,7 @@ class Window(torch.nn.Module):
             offset: number of frames in the past to rewrite
         """
         idx = self.wrap(self.record_index - offset)
-        self.memory[self.record_index] = x
+        self.memory[idx] = x
         self.record_index = self.wrap(self.record_index+1)
         return self.get(offset)
 
