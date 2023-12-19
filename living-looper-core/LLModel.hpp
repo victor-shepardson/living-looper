@@ -16,11 +16,15 @@ namespace LivingLooper {
 #define MAX_LOOPS 32
 #define SWAP(A, B) auto temp = A; A = B; B = temp;
 #define RANGE(I, N) for(int I=0; I<N; I++)
+#define PRINT(X) std::cout << X << std::endl;
+#define TORCH_GUARD ;
+// #define TORCH_GUARD c10::InferenceMode guard;
+
 
 // LLModel encapsulates the libtorch parts
 struct LLModel {
 
-    int loop_idx, oneshot, auto_mode;
+    int loop_idx, thru, auto_mode;
 
     torch::jit::Module model;
 
@@ -54,7 +58,7 @@ struct LLModel {
         this->host_sr = host_sr;
 
         loop_idx = 0;
-        oneshot = 0;
+        thru = 0;
 
         // TODO: expose processing latency to user
         // defaults to block_size - 1
@@ -72,11 +76,12 @@ struct LLModel {
 
         // unsigned int num_threads = std::thread::hardware_concurrency();
         torch::jit::getProfilingMode() = false;
-        c10::InferenceMode guard;
+        TORCH_GUARD;
         torch::jit::setGraphExecutorOptimize(true);
     }
 
     ~LLModel() {
+        TORCH_GUARD;
         if (load_thread && load_thread->joinable()) {
             load_thread->join();
         }
@@ -86,18 +91,18 @@ struct LLModel {
     }
 
     void reset() {
-        c10::InferenceMode guard;
+        TORCH_GUARD;
         model.get_method("reset")(model_args_empty);
     }
 
     void forward() {
-        c10::InferenceMode guard;
+        TORCH_GUARD;
         model_outs = model(model_args).toTupleRef().elements();
     }
 
     // ingest a single sample of audio input
     void write(float x) {
-        c10::InferenceMode guard;
+        TORCH_GUARD;
 
         // write to resampler
         res_in->write(x);
@@ -116,6 +121,7 @@ struct LLModel {
     } 
     // return a single sample of audio output
     void read(float * buf, float * latent_buf) {
+        TORCH_GUARD;
         float x[MAX_LOOPS];
         RANGE(i, n_loops) x[i] = 0;
 
@@ -143,6 +149,7 @@ struct LLModel {
             // std::cout << "IDX" << latent_idx << std::endl;
             auto acc = latent_buffer.accessor<float, 3>();
             RANGE(i, n_loops) latent_buf[i] = acc[i][0][latent_idx];
+            // RANGE(i, n_loops) PRINT(i << " " << latent_idx << " " << latent_buf[i]);
             latent_idx++;
         } else {
             RANGE(i, n_loops) latent_buf[i] = 0.;
@@ -155,6 +162,7 @@ struct LLModel {
 
     // start the next block of processing
     void dispatch() {
+        TORCH_GUARD;
         // PRINT("dispatch");
 
         if (compute_thread && compute_thread->joinable()) 
@@ -166,13 +174,15 @@ struct LLModel {
         model_args[1] = temp;
 
         model_args[0] = torch::IValue(loop_idx); 
-        model_args[2] = torch::IValue(oneshot); 
+        model_args[2] = torch::IValue(thru); 
         model_args[3] = torch::IValue(auto_mode); 
 
         compute_thread = std::make_unique<std::thread>(&LLModel::forward, this);
+        // PRINT("dispatch complete");
     } 
     // finish the last block of processing
     void join() {
+        TORCH_GUARD;
         // join model thread
         // PRINT("join");
         if (!compute_thread) 
@@ -182,14 +192,14 @@ struct LLModel {
 
         compute_thread->join();
 
-        read_buffer = model_outs[0].toTensor();
-        latent_buffer = model_outs[1].toTensor();
+        read_buffer = model_outs[0].toTensor().clone();
+        latent_buffer = model_outs[1].toTensor().clone();
         latent_idx = 0;
     }
     
     void _load(const std::string& filename) {
+        TORCH_GUARD;
         try {
-            c10::InferenceMode guard;
             model = torch::jit::load(filename);
             model.eval();
             // this->model = torch::jit::optimize_for_inference(this->model);
@@ -201,11 +211,6 @@ struct LLModel {
             PRINT("error loading the model\n");
             return;
         }
-
-        // support for Neutone models
-        // if (this->model.hasattr("model")){
-        //   this->model = this->model.attr("model").toModule();
-        // }
 
         this->block_size = this->n_latent = this->sr = this->n_loops = -1;
 
@@ -230,11 +235,11 @@ struct LLModel {
         PRINT("\tsample rate: " << sr );
         PRINT("\tlatent size: " << n_latent );
 
-        c10::InferenceMode guard;
+        // TORCH_GUARD;
         model_args.clear();
         model_args.push_back(torch::IValue(0)); //loop
         model_args.push_back(torch::ones({1,1,block_size})); //audio
-        model_args.push_back(torch::IValue(0)); //oneshot
+        model_args.push_back(torch::IValue(0)); //thru
         model_args.push_back(torch::IValue(0)); //auto
 
         delay = (block_size + m_processing_latency)/sr;

@@ -45,7 +45,7 @@ public:
 
         // TODO: this should result in a m_filt_len=1 when lanczos_n==0 ...
         // could then just set to 0 if sample rates are the same 
-        m_filt_len = int(ceil(
+        m_filt_len = int(std::ceil(
             rate_in / m_lanczos_rate * (m_lanczos_n + 1) * 2
         ));
 
@@ -60,8 +60,8 @@ public:
         delay = float(m_lanczos_n) / m_lanczos_rate;
     }
     float get_dt(long t_in, long t_out){
-        // cout << t_in << " " << t_out << endl;
-        // cout << t_out * m_rate_in - t_in * m_rate_out << " " << m_rate_out * m_rate_in << endl;
+        // std::cout << t_in << " " << t_out << std::endl;
+        // std::cout << t_out * m_rate_in - t_in * m_rate_out << " " << m_rate_out * m_rate_in << std::endl;
         return 
             float(t_out * m_rate_in - t_in * m_rate_out)
             / (m_rate_out * m_rate_in);
@@ -73,7 +73,7 @@ public:
             sinc(t_scale/m_lanczos_n) 
             * ((std::fabs(t_scale) <= m_lanczos_n) ? 1.0f : 0.0f);
 
-        // cout << t << " " << delay << " " << t_center << " " << t_scale << " " << w << endl;
+        // std::cout << t << " " << delay << " " << t_center << " " << t_scale << " " << w << std::endl;
 
         return w * sinc(t_scale);
     }
@@ -99,7 +99,7 @@ public:
         m_last_out = m_next_out;
         m_next_out += 1;
 
-        // cout << "read " << num << "/" << denom << endl;
+        // std::cout << "read " << num << "/" << denom << std::endl;
 
         return num / denom;
     }
@@ -107,7 +107,7 @@ public:
         //DEBUG
         // m_last_in = m_next_in; m_next_in += 1; m_values[0] = x; return;
 
-        // cout << "x " << x << " m_head " << m_head << " m_filt_len " << m_filt_len << endl;
+        // std::cout << "x " << x << " m_head " << m_head << " m_filt_len " << m_filt_len << std::endl;
         m_values[m_head] = x;
         m_times[m_head] = m_next_in;
 
