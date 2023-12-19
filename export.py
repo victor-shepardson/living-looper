@@ -377,8 +377,8 @@ class LivingLooper(nn.Module):
         """
         feature encoder
         """
-        # return self.model.encode(x)
-        return self.model.encode(x, temp=0.0)
+        return self.model.encode(x)
+        # return self.model.encode(x, temp=0.0)
 
     def decode(self, z):
         """
@@ -418,6 +418,14 @@ def main(
         logging.info(f"using {model}")
 
         model = torch.jit.load(model).eval()
+        try:
+            model = model.w2w_base
+        except:
+            pass
+        try:
+            model = model.model
+        except:
+            pass
         # print(model.latent_mean)
     else:
         raise ValueError

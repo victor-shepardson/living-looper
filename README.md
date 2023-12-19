@@ -1,13 +1,20 @@
 # Living Looper
 
-See Releases page for guitar model and binary release (macOS arm64).
+A binary release which runs within [SuperCollider](https://supercollider.github.io/) on macOS (apple silicon) is available from the [Releases page](https://github.com/victor-shepardson/living-looper/releases). It also contains a model for electric guitar.
+
+- Install SuperCollider
+- Download and unzip the release
+- Place the `LivingLooper` folder in the SuperCollider [extensions directory](https://doc.sccode.org/Guides/UsingExtensions.html)
+- Open SuperCollider
+- see the `LLGUI` helpfile
 
 Alternatively:
 
 - bring your own pretrained RAVE model
-- run it through `RAVE/export_looper.py` to produce a living looper `.ts` file
-- build the SuperCollider plugin in `living-looper-sc`
-- see `living-looper-sc/example/test.scd`
+- clone this repo and create a Python environment
+- run your RAVE model through `export.py` to produce a living looper `.ts` file
+- build the SuperCollider plugin in `living-looper-sc` with `cmake`
+- see `living-looper-sc/example/living-looper.scd`
 
 ## NIME paper
 
@@ -15,13 +22,13 @@ I presented this project in a talk at NIME 2023. The full paper will be publishe
 
 ## Models
 
-A Living Looper instance includes a pretrained RAVE encoder-decoder and a living loop algorithm, both implemented with pytorch and exported as a TorchScript file. Plugins for music software define a real-time audio and GUI interface, but must load a `living-looper.ts` file which defines the sound and behavior. 
+A Living Looper instance includes a pretrained RAVE encoder-decoder and a living loop algorithm, both implemented with pytorch and exported as a TorchScript file. Plugins for music software define a real-time audio and GUI interface, but must load a `.ts` file which defines the sound and behavior. 
 
-You can make your own `.ts` models using the RAVE fork (below) or download pre-trained ones from the [releases page](https://github.com/victor-shepardson/living-looper-juce/releases) (coming very soon!)
+You can make your own living looper `.ts` models from any [nn~](https://github.com/acids-ircam/nn_tilde) compatible streaming encoder/decoder model (such as [these](https://huggingface.co/Intelligent-Instruments-Lab/rave-models)) using the `export.py` script.
 
 ## Repository Structure
 
-`RAVE/` - a fork of the official RAVE implementation with changes to support the Living Looper. The main implementation of the Living Looper is also here (`RAVE/export_looper.py`) as it needs to stay in sync with the RAVE modifications.
+`export.py` - Python script which converts a RAVE model to a Living Looper model
 
 `living-looper-core/` - common components of C++ Living Looper plugins.
 
