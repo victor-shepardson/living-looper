@@ -11,6 +11,8 @@ import logging
 from termcolor import colored
 from tqdm import tqdm
 
+import nn_tilde
+
 from loop import Loop
 
 
@@ -49,13 +51,12 @@ from loop import Loop
     # for all loops:
     #    l.rep.feed(z[l])
 
-class LivingLooper(nn.Module):
+class LivingLooper(nn_tilde.Module):
     # __constants__ = ['loops']
 
     sampling_rate:int
     block_size:int
 
-    loop_index:int
     prev_loop_index:int
     step:int
     record_length:int
@@ -74,6 +75,10 @@ class LivingLooper(nn.Module):
             verbose:int=0
             ):
         super().__init__()
+
+        self.register_attribute('loop_index', (0,))
+        self.register_attribute('thru', (False,))
+        self.register_attribute('auto', (0,))
 
         self.n_loops = n_loops
         self.verbose = verbose
@@ -116,6 +121,13 @@ class LivingLooper(nn.Module):
             limit_margin_t, verbose,
         ) for i in range(n_loops+1))
 
+        self.register_buffer(
+            'needs_reset', torch.zeros(n_loops+1, dtype=torch.bool))
+        self.register_buffer(
+            'needs_start', torch.zeros(n_loops+1, dtype=torch.bool))
+        self.register_buffer(
+            'needs_end', torch.zeros(n_loops+1, dtype=torch.bool))
+
         self.register_buffer('mask', 
             torch.empty(2, n_loops+1, requires_grad=False))
     
@@ -125,12 +137,83 @@ class LivingLooper(nn.Module):
         
         self.reset()
 
+        self.register_method(
+            "encode",
+            in_channels=1,
+            in_ratio=1,
+            out_channels=self.n_latent,
+            out_ratio=self.block_size,
+            input_labels=['(signal) input'],
+            output_labels=['(signal) latent channel %d'%d for d in range(1, self.n_latent+1)], 
+        )
+
+        self.register_method(
+            "forward",
+            in_channels=1,
+            in_ratio=1,
+            out_channels=n_loops,
+            out_ratio=1,
+            input_labels=['(signal) input'],
+            output_labels=['(signal) loop channel %d'%d for d in range(1, self.n_loops+1)], 
+            test_buffer_size=2048,##TODO
+        )
+
+        self.register_method(
+            "forward_with_latents",
+            in_channels=1,
+            in_ratio=1,
+            out_channels=n_loops*2,
+            out_ratio=1,
+            input_labels=['(signal) input'],
+            output_labels=
+                ['(signal) loop channel %d'%d for d in range(1, self.n_loops+1)]
+                + ['(signal) latents channel %d'%d for d in range(1, self.n_loops+1)],
+            test_buffer_size=2048##TODO
+        )
+
+    @torch.jit.export
+    def get_loop_index(self) -> int:
+        return self.loop_index[0]
+    @torch.jit.export
+    def set_loop_index(self, i: int) -> int:
+        i_prev = self.loop_index[0]
+        if abs(i) > self.n_loops:
+            if self.verbose>0:
+                print(f'loop {i} out of range')
+            i = 0
+        if i!=i_prev:
+            if i < 0:
+                self.needs_reset[-i] = True
+            if i > 0:
+                self.needs_start[i] = True
+            if i_prev > 0:
+                self.needs_end[i_prev] = True
+        self.prev_loop_index = i_prev
+        self.loop_index = i,
+        return 0
+    
+    @torch.jit.export
+    def get_thru(self) -> bool:
+        return self.thru[0]
+    @torch.jit.export
+    def set_thru(self, val: bool) -> int:
+        self.thru = val,
+        return 0
+    
+    @torch.jit.export
+    def get_auto(self) -> int:
+        return self.auto[0]
+    @torch.jit.export
+    def set_auto(self, val: int) -> int:
+        self.auto = val,
+        return 0
+
     @torch.jit.export
     def reset(self):
         self.record_length = 0
         self.step = 0
-        self.loop_index = 0
-        self.prev_loop_index = 0
+        self.set_loop_index(0)
+        self.set_loop_index(0) # twice to set prev
 
         for l in self.loops:
             l.reset()
@@ -142,13 +225,30 @@ class LivingLooper(nn.Module):
             for loop in self.loops:
                 loop.feed(step, torch.zeros(self.n_latent))
 
-    def forward(self, loop_index:int, x, thru:int=0, auto:int=0):
+    def forward(self, x):
+        # print(x.shape)
+        x, z = self.process(x)
+        return x
+    
+    @torch.jit.export
+    def forward_with_latents(self, x):
+        # print('forward_with_latents')
+        x, z = self.process(x)
+        # dump latents into audio stream
+        z_pad = torch.zeros_like(x)
+        z_pad[:,:,:z.shape[-1]] = z
+        # concatenate channels
+        return torch.cat((x,z_pad), 1)
+
+    @torch.jit.export
+    def process(self, x):
         """
         Args:
-            loop_index: loop record index
-                0 for no loop, 1-indexed loop to record, negative index to erase
             x: input audio
                 Tensor[1, 1, sample]
+        Attributes:
+            loop_index: loop record index
+                0 for no loop, 1-indexed loop to record, negative index to erase
             thru:
                 0 to mute loop while it is being recorded 
                 1 to pass the reconstruction through while recording
@@ -156,9 +256,15 @@ class LivingLooper(nn.Module):
                 0 for manual loop control
                 1 for replace median similar loop
         Returns:
-            audio frame: Tensor[loop, 1, sample]
-            latent frame: Tensor[loop, 1, latent]
+            audio frame: Tensor[1, loop, sample]
+            latent frame: Tensor[1, loop, latent]
         """
+        loop_index = self.get_loop_index()
+
+        batch = x.shape[0]
+        if batch > 1:
+            x = x.mean(0)[None]
+            print('WARNING: LivingLooper: batching not supported')
 
         self.step += 1
         if self.verbose > 1:
@@ -176,64 +282,46 @@ class LivingLooper(nn.Module):
             print(f'done')
             # print(z)
 
-        if (loop_index!=self.prev_loop_index and loop_index < 0):
-            self.reset_loop(-loop_index)
-
-        # this is the previous *input* not necessarily previous actual
-        self.prev_loop_index = loop_index
-
-        if auto==0:
-            # use the input loop index
-            i = loop_index
-        else:
+        if self.get_auto()>0:
             ### internal auto triggering : (use z to override i)
             zd = torch.linalg.vector_norm(z[:2] - self.landmark_z[:2]).item()
             if (
                 z[0].abs().item() > 1
                 and zd > 3
-                and (self.record_length > 48 * 2048//self.block_size or self.loop_index < 1)
+                and (self.record_length > 48 * 2048//self.block_size or self.needs_reset.any())
                 and torch.rand((1,)).item() > 0.5 ### TEST
                 ):
                 # auto-set a new loop index
 
                 # choose the (other) loop with current medium-similar z
-                idx = self.loop_index
                 others = self.zs[0].clone()
 
-                if auto==1:
+                if self.get_auto()==1:
                     others[0] = np.inf
-                    if idx>=0:
-                        others[idx] = np.inf
-                    i = int(torch.linalg.vector_norm(others - z, 2, -1).argmin().item())
-                elif auto==2:
+                    if loop_index>=0:
+                        others[loop_index] = np.inf
+                    self.set_loop_index(int(
+                        torch.linalg.vector_norm(others - z, 2, -1)
+                        .argmin().item()))
+                elif self.get_auto()==2:
                     others[0] = z
-                    if idx>=0:
-                        others[idx] = z
-                    i = int(torch.linalg.vector_norm(others - z, 2, -1).median(0).indices.item())
+                    if loop_index>=0:
+                        others[loop_index] = z
+                    self.set_loop_index(int(
+                        torch.linalg.vector_norm(others - z, 2, -1)
+                        .median(0).indices.item()))
                 else:
                     others[0] = z
-                    if idx>=0:
-                        others[idx] = z
-                    i = int(torch.linalg.vector_norm(others - z, 2, -1).argmax().item())
-
+                    if loop_index>=0:
+                        others[loop_index] = z
+                    self.set_loop_index(int(
+                        torch.linalg.vector_norm(others - z, 2, -1)
+                        .argmax().item()))
                 # i = int(torch.randint(0,self.n_loops+1,(1,)).item())
                 # print(zd, i)
                 # print(z)
                 self.landmark_z[:] = z
-            else:
-                # previous value persists
-                i = self.loop_index
             ### end auto triggering
-
-        if abs(i) > self.n_loops:
-            if self.verbose>0:
-                print(f'loop {i} out of range')
-            i = 0
-
-        # print(f'active loop {i}')
-        i_prev = self.loop_index
-        # if i!=i_prev: # change in loop select control
-            # print(f'switch from {i_prev}')
 
         # feed the current input
         # TODO:
@@ -243,24 +331,26 @@ class LivingLooper(nn.Module):
         # so feed the previous loop instead?
         # alternatively, require the ability for features to 'roll back' one step?
         # or, have a separate rep/store for the input(s)?
-        for l,loop in enumerate(self.loops):
-            if l in (0, i):
+        for i,loop in enumerate(self.loops):
+            if i==0 or i==loop_index:
                 loop.feed(self.step-self.latency_correct, z)
 
-        # print(i, i_prev, self.loop_length)
-        if i!=i_prev: # change in loop select control
-            if i_prev > 0: # previously on a loop
-                # if self.record_length >= self.min_loop: # and it was long enough
-                # convert to 0-index here
-                self.finalize_loop(i_prev)
-            if i>0: # starting a new loop recording
+        for i,b in enumerate(self.needs_reset):
+            if b:
+                self.reset_loop(i)
+
+        for i,b in enumerate(self.needs_start):
+            if b:
                 self.record_length = 0
                 self.reset_loop(i)
                 self.start_loop(i)
-                if thru:
+                if self.get_thru():
                     # print('unmask')
                     self.mask[1,i] = 1
-            self.loop_index = i
+
+        for i,b in enumerate(self.needs_end):
+            if b:
+                self.finalize_loop(i)
 
         # fit active loop / predict other loops
         for l,loop in enumerate(self.loops):
@@ -268,7 +358,7 @@ class LivingLooper(nn.Module):
             # NOTE: slicing self.loops is BUGGED here in torchscript?
             # print(l, id(loop), loop.index)
             if l > 0:
-                if i==l:
+                if loop_index==l:
                     if self.verbose>1:
                         print(f'--fitting loop {l}--')
                     t = self.step - self.latency_correct
@@ -304,8 +394,11 @@ class LivingLooper(nn.Module):
         y = y * mask[1:]
         self.mask[0] = self.mask[1]
 
-
-        return y, self.zs[:,1:].permute(1,0,2)
+        y = y.permute(1,0,2) # 1, loop, time
+        z = self.zs[:,1:] # 1, loop, latent
+        y = y.expand(batch, y.shape[1], y.shape[2])
+        z = z.expand(batch, z.shape[1], z.shape[2])
+        return y, z
 
         # print(f'{self.loop_length}, {self.record_index}, {self.loop_index}')
 
@@ -342,6 +435,7 @@ class LivingLooper(nn.Module):
                 if self.verbose>0:
                     print(f'done')
         self.mask[1,i] = 0.
+        self.needs_reset[i] = False
 
     def start_loop(self, i:int):
         for j,loop in enumerate(self.loops): 
@@ -350,6 +444,7 @@ class LivingLooper(nn.Module):
                     print(f'starting {i}...')
                 # replace the target loop's feature retroactively with the input feature
                 loop.replace(self.loops[0])
+        self.needs_start[i] = False
 
     def finalize_loop(self, i:int):
         """
@@ -372,6 +467,7 @@ class LivingLooper(nn.Module):
                     loop.feed(self.step-dt+1, z)
                     
         self.mask[1,i] = 1.
+        self.needs_end[i] = False
 
     def encode(self, x):
         """
@@ -448,7 +544,8 @@ def main(
     def feed(i):
         x = (torch.rand(1, 1, looper.block_size)-0.5)*0.01
         # x = (torch.rand(1, 1, 2**11)-0.5)*0.1
-        looper(i, x)
+        looper.set_loop_index(i)
+        looper(x)
 
     def smoke_test():
         looper.reset()
