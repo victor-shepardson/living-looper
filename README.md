@@ -11,7 +11,7 @@ An version which runs within [SuperCollider](https://supercollider.github.io/) c
 
 ## Python scripts
 
-Using `export.py`, you can create your own Living Looper models from any `nn~` compatible (causal) encoder-decoder model, i.e. RAVE.
+Using `export.py`, you can create your own Living Looper models from an `nn~` compatible (causal) encoder-decoder model, e.g. RAVE.
 
 - bring your own pretrained RAVE model
 - clone this repo and create a Python environment with `nn_tilde` and `pytorch`
