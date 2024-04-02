@@ -1,24 +1,25 @@
 # Living Looper
 
-A binary release which runs within [SuperCollider](https://supercollider.github.io/) on macOS (apple silicon) is available from the [Releases page](https://github.com/victor-shepardson/living-looper/releases). It also contains a model for electric guitar.
+## SuperCollider Quark
+
+An version which runs within [SuperCollider](https://supercollider.github.io/) can be installed like so:
 
 - Install SuperCollider
-- Download and unzip the release
-- Place the `LivingLooper` folder in the SuperCollider [extensions directory](https://doc.sccode.org/Guides/UsingExtensions.html)
-- Open SuperCollider
+- Install [NN.ar](https://github.com/elgiano/nn.ar)
+- In SuperCollider, run `Quarks.install("https://github.com/victor-shepardson/living-looper-sc")`
 - see the `LLGUI` helpfile
 
-Alternatively:
+## Python scripts
+
+Using `export.py`, you can create your own Living Looper models from any `nn~` compatible (causal) encoder-decoder model, i.e. RAVE.
 
 - bring your own pretrained RAVE model
-- clone this repo and create a Python environment
+- clone this repo and create a Python environment with `nn_tilde` and `pytorch`
 - run your RAVE model through `export.py` to produce a living looper `.ts` file
-- build the SuperCollider plugin in `living-looper-sc` with `cmake`
-- see `living-looper-sc/example/living-looper.scd`
 
 ## NIME paper
 
-I presented this project in a talk at NIME 2023. The full paper will be published soon, and a preprint is available [here](https://iil.is/pdf/2023_nime_shepardson_magnusson_living_looper.pdf)
+This project was presented at NIME 2023. The full paper is available [here](https://www.nime.org/proc/nime2023_32/index.html)
 
 ## Models
 
@@ -30,9 +31,9 @@ You can make your own living looper `.ts` models from any [nn~](https://github.c
 
 `export.py` - Python script which converts a RAVE model to a Living Looper model
 
-`living-looper-core/` - common components of C++ Living Looper plugins.
+`living-looper-sc/` - SuperCollider Quark with GUI
 
-`living-looper-sc/` - SuperCollider Plugin with GUI
+`living-looper-core/` - common components of C++ Living Looper plugins.
 
 `living-looper-juce/` - JUCE plugin (WIP, not functional at present)
 
@@ -42,4 +43,4 @@ This project incorporates `RAVE`, which uses the Creative Commons Attribution-No
 
 The plugin components including `living-looper-sc` and `living-looper-juce` are licensed under GPLv3.
 
-As I understand it, the above affects what you can do with the source code, for example, publishing your own fork is allowed, but selling a VST based on it is not. You are free to do anything you want with the actual plugins and trained models, including making commercial art or music releases.
+As I understand it, the above affects what you can do with the source code, for example, publishing your own fork is allowed, but selling a VST based on it is not. You are free to do anything you want with the actual plugins and trained models, including making commercial art installations or music releases.
