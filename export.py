@@ -171,11 +171,16 @@ class LivingLooper(nn_tilde.Module):
             test_buffer_size=2048##TODO
         )
 
+    # loop_index has to be a tuple for nn~ reasons
     @torch.jit.export
     def get_loop_index(self) -> int:
         return self.loop_index[0]
     @torch.jit.export
     def set_loop_index(self, i: int) -> int:
+        """
+        set the current active loop, possibly triggering start/finalize
+        negative values cause reset
+        """
         i_prev = self.loop_index[0]
         if abs(i) > self.n_loops:
             if self.verbose>0:
@@ -259,7 +264,6 @@ class LivingLooper(nn_tilde.Module):
             audio frame: Tensor[1, loop, sample]
             latent frame: Tensor[1, loop, latent]
         """
-        loop_index = self.get_loop_index()
 
         batch = x.shape[0]
         if batch > 1:
@@ -295,6 +299,7 @@ class LivingLooper(nn_tilde.Module):
 
                 # choose the (other) loop with current medium-similar z
                 others = self.zs[0].clone()
+                loop_index = self.get_loop_index()
 
                 if self.get_auto()==1:
                     others[0] = np.inf
@@ -322,6 +327,8 @@ class LivingLooper(nn_tilde.Module):
                 # print(z)
                 self.landmark_z[:] = z
             ### end auto triggering
+                
+        loop_index = self.get_loop_index()
 
         # feed the current input
         # TODO:

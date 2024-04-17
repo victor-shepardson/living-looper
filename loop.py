@@ -36,7 +36,7 @@ class FeatureStore(torch.nn.Module):
         if step in self.memory:
             return self.memory[step]
         else:
-            print('memory contains:', self.memory.keys())
+            print('step: ', step, 'memory contains: ', self.memory.keys())
             raise KeyError(step)
         
 
