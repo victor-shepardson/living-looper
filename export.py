@@ -72,6 +72,7 @@ class LivingLooper(nn_tilde.Module):
             latency_correct:int, # in latent frames
             sr:int, # sample rate
             limit_margin:List[float], # limit latents relative to recorded min/max
+            latent_signs:List[int], # flip latents
             verbose:int=0
             ):
         super().__init__()
@@ -114,6 +115,17 @@ class LivingLooper(nn_tilde.Module):
                 f'{len(limit_margin)=} is greater than {self.n_latent=}')
         limit_margin_t = torch.tensor(limit_margin)
 
+         # pad the latent_signs argument and convert to tensor
+        n_fill = self.n_latent - len(latent_signs)
+        if n_fill > 0:
+            latent_signs = latent_signs + [latent_signs[-1]]*n_fill
+        elif n_fill < 0:
+            raise ValueError(
+                f'{len(latent_signs)=} is greater than {self.n_latent=}')
+        latent_signs_t = torch.tensor(latent_signs)[...,None]
+
+        self.register_buffer('latent_signs', latent_signs_t)
+
         # create Loops
         # loop 0 is the input feature extractor
         self.loops = nn.ModuleList(Loop(
@@ -137,39 +149,41 @@ class LivingLooper(nn_tilde.Module):
         
         self.reset()
 
-        self.register_method(
-            "encode",
-            in_channels=1,
-            in_ratio=1,
-            out_channels=self.n_latent,
-            out_ratio=self.block_size,
-            input_labels=['(signal) input'],
-            output_labels=['(signal) latent channel %d'%d for d in range(1, self.n_latent+1)], 
-        )
+        ## nn~ methods
+        with torch.no_grad():
+            self.register_method(
+                "encode",
+                in_channels=1,
+                in_ratio=1,
+                out_channels=self.n_latent,
+                out_ratio=self.block_size,
+                input_labels=['(signal) input'],
+                output_labels=['(signal) latent channel %d'%d for d in range(1, self.n_latent+1)], 
+            )
 
-        self.register_method(
-            "forward",
-            in_channels=1,
-            in_ratio=1,
-            out_channels=n_loops,
-            out_ratio=1,
-            input_labels=['(signal) input'],
-            output_labels=['(signal) loop channel %d'%d for d in range(1, self.n_loops+1)], 
-            test_buffer_size=2048,##TODO
-        )
+            self.register_method(
+                "forward",
+                in_channels=1,
+                in_ratio=1,
+                out_channels=n_loops,
+                out_ratio=1,
+                input_labels=['(signal) input'],
+                output_labels=['(signal) loop channel %d'%d for d in range(1, self.n_loops+1)], 
+                test_buffer_size=2048,##TODO
+            )
 
-        self.register_method(
-            "forward_with_latents",
-            in_channels=1,
-            in_ratio=1,
-            out_channels=n_loops*2,
-            out_ratio=1,
-            input_labels=['(signal) input'],
-            output_labels=
-                ['(signal) loop channel %d'%d for d in range(1, self.n_loops+1)]
-                + ['(signal) latents channel %d'%d for d in range(1, self.n_loops+1)],
-            test_buffer_size=2048##TODO
-        )
+            self.register_method(
+                "forward_with_latents",
+                in_channels=1,
+                in_ratio=1,
+                out_channels=n_loops*2,
+                out_ratio=1,
+                input_labels=['(signal) input'],
+                output_labels=
+                    ['(signal) loop channel %d'%d for d in range(1, self.n_loops+1)]
+                    + ['(signal) latents channel %d'%d for d in range(1, self.n_loops+1)],
+                test_buffer_size=2048##TODO
+            )
 
     # loop_index has to be a tuple for nn~ reasons
     @torch.jit.export
@@ -189,10 +203,10 @@ class LivingLooper(nn_tilde.Module):
         if i!=i_prev:
             if i < 0:
                 self.needs_reset[-i] = True
-            if i > 0:
-                self.needs_start[i] = True
             if i_prev > 0:
                 self.needs_end[i_prev] = True
+            if i > 0:
+                self.needs_start[i] = True
         self.prev_loop_index = i_prev
         self.loop_index = i,
         return 0
@@ -239,9 +253,12 @@ class LivingLooper(nn_tilde.Module):
     def forward_with_latents(self, x):
         # print('forward_with_latents')
         x, z = self.process(x)
+        # print(z[0,:,0])
         # dump latents into audio stream
+        # start with 0 and n, to trigger
         z_pad = torch.zeros_like(x)
-        z_pad[:,:,:z.shape[-1]] = z
+        z_pad[:,:,1] = z.shape[2]
+        z_pad[:,:,2:z.shape[-1]+2] = z
         # concatenate channels
         return torch.cat((x,z_pad), 1)
 
@@ -342,6 +359,10 @@ class LivingLooper(nn_tilde.Module):
             if i==0 or i==loop_index:
                 loop.feed(self.step-self.latency_correct, z)
 
+        for i,b in enumerate(self.needs_end):
+            if b:
+                self.finalize_loop(i)
+
         for i,b in enumerate(self.needs_reset):
             if b:
                 self.reset_loop(i)
@@ -354,10 +375,6 @@ class LivingLooper(nn_tilde.Module):
                 if self.get_thru():
                     # print('unmask')
                     self.mask[1,i] = 1
-
-        for i,b in enumerate(self.needs_end):
-            if b:
-                self.finalize_loop(i)
 
         # fit active loop / predict other loops
         for l,loop in enumerate(self.loops):
@@ -449,8 +466,8 @@ class LivingLooper(nn_tilde.Module):
             if i==j:
                 if self.verbose>0:
                     print(f'starting {i}...')
-                # replace the target loop's feature retroactively with the input feature
                 loop.replace(self.loops[0])
+                # replace the target loop's feature retroactively with the input feature
         self.needs_start[i] = False
 
     def finalize_loop(self, i:int):
@@ -480,13 +497,18 @@ class LivingLooper(nn_tilde.Module):
         """
         feature encoder
         """
-        return self.model.encode(x)
-        # return self.model.encode(x, temp=0.0)
+        x = x + torch.randn_like(x)*1e-5
+        # TODO -- use temp when available
+        z = self.model.encode(x)
+        # z = self.model.encode(x, temp=0.0)
+        z = z*self.latent_signs
+        return z.clip(-10, 10)
 
     def decode(self, z):
         """
         audio decoder
         """
+        z = z*self.latent_signs
         return self.model.decode(z)
     
 
@@ -507,6 +529,7 @@ def main(
     # last value is repeated for remaining latents
     # limit_margin=[0.1, 0.5, 1],
     limit_margin=[0.1, 0.2, 0.5],
+    latent_signs=[1],
     # included in output filename
     name="test",
     verbose=0,
@@ -543,6 +566,7 @@ def main(
         latency_correct,
         sr,
         limit_margin,
+        latent_signs,
         verbose
         )
     looper.eval()

@@ -5,9 +5,15 @@
 An version which runs within [SuperCollider](https://supercollider.github.io/) can be installed like so:
 
 - Install SuperCollider
-- Install [NN.ar](https://github.com/elgiano/nn.ar)
-- In SuperCollider, run `Quarks.install("https://github.com/victor-shepardson/living-looper-sc")`
-- see the `LLGUI` helpfile
+- open SuperCollider
+    - on Windows, you may need to run as administrator the first time
+- In SuperCollider, run the line `Quarks.install("https://github.com/victor-shepardson/living-looper-sc")` 
+    - (type it in a press shift+return)
+- then run the line `LivingLooper.new`
+    - a LivingLooper window should appear
+- select your audio devices and press the "start audio" button
+    - this will prompt you to install `NN.ar` if not already installed
+- see the `LivingLooper` helpfile for more
 
 ## Python scripts
 

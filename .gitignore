@@ -1,3 +1,15 @@
+# pytorch
+*.ts
+*.ckpt
+*.pt
+
+# binaries
+*.zip
+*.tar.gz
+
+# editor
+.vscode
+
 # macOS
 .DS_Store
 
