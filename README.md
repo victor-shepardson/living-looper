@@ -2,18 +2,32 @@
 
 ## SuperCollider Quark
 
-An version which runs within [SuperCollider](https://supercollider.github.io/) can be installed like so:
+A version which runs within [SuperCollider](https://supercollider.github.io/) can be installed like so:
 
 - Install SuperCollider
 - open SuperCollider
     - on Windows, you may need to run as administrator the first time
+
+### Automatic install
+
 - In SuperCollider, run the line `Quarks.install("https://github.com/victor-shepardson/living-looper-sc")` 
     - (type it in a press shift+return)
 - then run the line `LivingLooper.new`
     - a LivingLooper window should appear
-- select your audio devices and press the "start audio" button
+- Select your audio devices and press the "start audio" button
     - this will prompt you to install `NN.ar` if not already installed
-- see the `LivingLooper` helpfile for more
+- See the `LivingLooper` helpfile to get started
+
+### Manual install
+
+- Locate the SuperCollider extension folder from the SuperCollider menu: `File -> open user support directory -> Extensions`
+- Install SuperCollider plugins by placing them in this folder:
+    - NN.ar: https://github.com/elgiano/nn.ar/releases/tag/v0.0.6-updated
+        - download the zip file for your platform
+    - Living Looper: https://github.com/victor-shepardson/living-looper-sc/releases/tag/v1.1.1
+        - download the "Source Code" zip file
+- In the SuperCollider menu select `Language -> reboot interpreter`
+- then run the line `LivingLooper.new`
 
 ## Python scripts
 
