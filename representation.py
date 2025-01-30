@@ -39,7 +39,7 @@ class Slice(torch.nn.Module):
         self.n_feature = end - start
     def reset(self):
         pass
-    def feed(self, x, offset:int=0):
+    def feed(self, x):
         return x[self.start:self.end]
     def replace(self, other:"Slice"):
         pass  
@@ -56,8 +56,8 @@ class Cat2(torch.nn.Module):
     def reset(self):
         self.a.reset()
         self.b.reset()
-    def feed(self, x, offset:int=0):
-        return torch.cat((self.a.feed(x, offset), self.b.feed(x, offset)), -1)
+    def feed(self, x):
+        return torch.cat((self.a.feed(x), self.b.feed(x)), -1)
     def replace(self, other:"Cat2"):
         # print(type(self)==type(other), type(other))
         # print(type(self.b), type(other.b))
@@ -74,8 +74,8 @@ class Chain2(torch.nn.Module):
     def reset(self):
         self.a.reset()
         self.b.reset()
-    def feed(self, x, offset:int=0):
-        return self.b.feed(self.a.feed(x, offset), offset)
+    def feed(self, x):
+        return self.b.feed(self.a.feed(x))
     def replace(self, other:"Chain2"):
         # print(type(self)==type(other), type(self))
         self.a.replace(other.a)
@@ -138,8 +138,8 @@ class Quadratic(torch.nn.Module):
         self.n_feature = m.n_feature**2
     def reset(self):
         self.m.reset()
-    def feed(self, x, offset:int=0):
-        x = self.m.feed(x, offset)
+    def feed(self, x):
+        x = self.m.feed(x)
         return (x * x[...,None]).view(-1)
     def replace(self, other:"Quadratic"):
         self.m.replace(other.m)
@@ -151,8 +151,8 @@ class DividedQuadratic(torch.nn.Module):
         self.n_feature = m.n_feature**2 * 2
     def reset(self):
         self.m.reset()
-    def feed(self, x, offset:int=0):
-        x = self.m.feed(x, offset)
+    def feed(self, x):
+        x = self.m.feed(x)
         return (torch.cat((
             torch.nn.functional.softplus(x), torch.nn.functional.softplus(-x)
             )) * x[...,None]).view(-1)
@@ -190,21 +190,20 @@ class Window(torch.nn.Module):
     def wrap(self, idx:int):
         return idx % self.n_memory
 
-    def feed(self, x, offset:int=0):
+    def feed(self, x):
         """feed a vector into loop memory and update pointer
         Args:
             x: input vector
-            offset: number of frames in the past to rewrite
         """
-        idx = self.wrap(self.record_index - offset)
+        idx = self.wrap(self.record_index)
         self.memory[idx] = x
         self.record_index = self.wrap(self.record_index+1)
-        return self.get(offset)
+        return self.get()
 
-    def get(self, offset:int=0):
+    def get(self):
         """read out of loop memory"""
         # end = (self.record_index) % self.n_ctx + 1
-        end = self.wrap(self.record_index - 1 - offset) + 1
+        end = self.wrap(self.record_index - 1) + 1
         begin = self.wrap(end - self.n_ctx)
         # print(n, begin, end)
         if begin<end:
@@ -242,23 +241,22 @@ class MultiWindow(torch.nn.Module):
         self.memory[:] = other.memory
         self.record_index = other.record_index
 
-    def feed(self, x, offset:int=0):
+    def feed(self, x):
         """feed a vector into loop memory and update pointer
         Args:
             x: input vector
-            offset: number of frames in the past to rewrite
         """
-        idx1 = (self.record_index - offset) % self.n_memory
-        idx2 = (self.record_index - offset + self.n_memory//2) % self.n_memory
+        idx1 = self.record_index % self.n_memory
+        idx2 = (self.record_index + self.n_memory//2) % self.n_memory
         self.memory[idx1] = self.memory[idx2] = x
         self.record_index = (self.record_index+1) % self.n_memory
-        return self.get(offset)
+        return self.get()
 
-    def get(self, offset:int=0):
+    def get(self):
         """read out of loop memory"""
         windows = []
         for i,n in enumerate(self.n_ctx):
-            begin = (self.record_index - n - offset)%(self.n_memory//2)
+            begin = (self.record_index - n)%(self.n_memory//2)
             end = begin + n
             windows.append(self.memory[begin:end,i])
 
@@ -275,7 +273,7 @@ class RNN(torch.nn.Module):
         ):
         super().__init__()
 
-        self.register_buffer('hidden', torch.empty(3, n_hidden))
+        self.register_buffer('hidden', torch.empty(n_hidden))
         self.register_buffer('ih', torch.empty(n_target, n_hidden))
         self.register_buffer('hh', torch.empty(n_hidden, n_hidden))
         self.register_buffer('ho', torch.empty(n_hidden, n_out))
@@ -292,12 +290,6 @@ class RNN(torch.nn.Module):
 
     def reset(self):
         self.hidden.zero_()
-        # self.ih[:] = torch.randn_like(self.ih)
-        # self.ih = self.ih / self.ih.pow(2).sum(0).sqrt()
-        # self.ho[:] = torch.randn_like(self.ho)
-        # self.ho = self.ho / self.ho.pow(2).sum(0).sqrt()
-        # self.hh[:] = torch.randn_like(self.hh)
-        # self.hh = self.hh / self.hh.pow(2).sum(0).sqrt()
         self.init(self.ih)
         self.init(self.hh)
         self.init(self.ho)
@@ -308,21 +300,18 @@ class RNN(torch.nn.Module):
     def wrap(self, idx:int):
         return idx % self.n_memory
 
-    def feed(self, x, offset:int=0):
+    def feed(self, x):
         """feed a vector into loop memory and update pointer
         Args:
             x: input vector
-            offset: number of frames in the past to rewrite
         """
-        h = self.hidden[offset]
+        h = self.hidden
 
         h_new = x @ self.ih + h @ self.hh
         h_new = h_new.sin()
         # mix = torch.linspace(0, -5, h.shape[0]).exp()
         # h = mix * h_new + (1-mix) * h
 
-        for i in range(2,offset,-1):
-            self.hidden[i] = self.hidden[i-1]
-        self.hidden[offset] = h
+        self.hidden[:] = h_new
 
-        return h @ self.ho
+        return h_new @ self.ho

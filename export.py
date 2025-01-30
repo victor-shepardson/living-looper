@@ -236,13 +236,11 @@ class LivingLooper(nn_tilde.Module):
 
         for l in self.loops:
             l.reset()
-            l.store.reset()
 
         self.mask.zero_()
 
-        for step in range(-2*self.latency_correct, 1):
-            for loop in self.loops:
-                loop.feed(step, torch.zeros(self.n_latent))
+        for loop in self.loops:
+            loop.feed(torch.zeros(self.n_latent))
 
     def forward(self, x):
         # print(x.shape)
@@ -298,7 +296,7 @@ class LivingLooper(nn_tilde.Module):
             print(f'encoding...')
         with torch.no_grad():
             z = self.encode(x).squeeze()
-            # print(z)
+            # print('encoded', z.shape)
         if self.verbose > 1:
             print(f'done')
             # print(z)
@@ -349,16 +347,11 @@ class LivingLooper(nn_tilde.Module):
         loop_index = self.get_loop_index()
 
         # feed the current input
-        # TODO:
-        # if just switched from another loop,
-        # the previous active loop needs to roll out,
-        # and the new active loop already has a prediction,
-        # so feed the previous loop instead?
-        # alternatively, require the ability for features to 'roll back' one step?
-        # or, have a separate rep/store for the input(s)?
-        for i,loop in enumerate(self.loops):
-            if i==0 or i==loop_index:
-                loop.feed(self.step-self.latency_correct, z)
+        # it goes to loop 0, which maintains a continuous loop feature
+        # but also to the currently fitting loop
+        # for i,loop in enumerate(self.loops):
+        #     if i==0 or i==loop_index:
+        #         loop.feed(z)
 
         for i,b in enumerate(self.needs_end):
             if b:
@@ -377,28 +370,30 @@ class LivingLooper(nn_tilde.Module):
                     # print('unmask')
                     self.mask[1,i] = 1
 
-        # fit active loop / predict other loops
+        self.zs[:,0] = z
+
+        # fit active loops, then predict other loops
         for l,loop in enumerate(self.loops):
         # for l,loop in enumerate(self.loops[1:],1):
             # NOTE: slicing self.loops is BUGGED here in torchscript?
             # print(l, id(loop), loop.index)
-            if l > 0:
-                if loop_index==l:
-                    if self.verbose>1:
-                        print(f'--fitting loop {l}--')
-                    t = self.step - self.latency_correct
-                    feat = self.get_feature(l, self.latency_correct + 1)
-                    zl = z
-                    loop.partial_fit(t, feat, z)
-                    # in this case, feed happened above
-                else:
-                    if self.verbose>1:
-                        print(f'--predicting loop {l}--')
-                    feat = self.get_feature(l, 1)
-                    zl = loop.predict(self.step, feat)
-                    loop.feed(self.step, zl)
-                self.zs[:,l] = zl
-                # print('done')
+            if l>0 and loop_index==l:
+                if self.verbose>1:
+                    print(f'--fitting loop {l}--')
+                feat = self.get_feature(l)
+                loop.partial_fit(self.step, feat, z)
+                # in this case, feed happened above
+                self.zs[:,l] = z
+
+        for l,loop in enumerate(self.loops):
+            if l>0 and loop_index!=l:
+                if self.verbose>1:
+                    print(f'--predicting loop {l}--')
+                feat = self.get_feature(l)
+                self.zs[:,l] = loop.predict(self.step, feat)
+
+        for l,loop in enumerate(self.loops):
+            loop.feed(self.zs[0,l])
 
         self.record_length += 1
 
@@ -433,17 +428,13 @@ class LivingLooper(nn_tilde.Module):
         #     (torch.arange(0,self.block_size)/128*2*np.pi).sin()/3 
         # ))[:,None]
 
-    def get_feature(self, i:int, delay:int):
+    def get_feature(self, i:int):
         """
         Args:
             i: zero indexed target loop number
             delay: number of frames in the past
         """
-        step = self.step - delay
-        return torch.cat([loop.get(
-            step if (l==i) else 
-            (step - self.latency_correct + 1)
-            ) for l,loop in enumerate(self.loops[1:], 1)
+        return torch.cat([loop.get() for loop in self.loops[1:]
         ])
 
     def reset_loop(self, i:int):
@@ -484,12 +475,12 @@ class LivingLooper(nn_tilde.Module):
         for j,loop in enumerate(self.loops): 
             if i==j:
                 loop.finalize()
-                # rollout predictions to make up latency
-                for dt in range(self.latency_correct+1,1,-1):
-                    # print(f'rollout {dt}')
-                    feat = self.get_feature(i,dt)
-                    z = loop.predict(self.step-dt, feat)
-                    loop.feed(self.step-dt+1, z)
+                # # rollout predictions to make up latency
+                # for dt in range(self.latency_correct+1,1,-1):
+                #     # print(f'rollout {dt}')
+                #     feat = self.get_feature(i,dt)
+                #     z = loop.predict(self.step-dt, feat)
+                #     loop.feed(self.step-dt+1, z)
                     
         self.mask[1,i] = 1.
         self.needs_end[i] = False

@@ -7,73 +7,6 @@ from model import ILR, IPLS, GDKR, Moments, Residual2
 from representation import Window, RNN, DividedQuadratic, Cat, Chain, Slice, MultiWindow
 from transform import LinQuad, Tanh, Id
 
-# class FeatureStore(torch.nn.Module):
-#     max_steps: int
-#     memory: Dict[int, torch.Tensor]
-#     def __init__(self, 
-#             max_steps:int,
-#             ):
-#         super().__init__()
-#         self.max_steps = max_steps
-#         self.memory = {}
-
-#     def reset(self):
-#         # print('store reset')
-#         self.memory.clear()
-
-#     def replace(self, other:"FeatureStore"):
-#         # self.memory = dict(other.memory)
-#         self.memory.update(other.memory)
-
-#     def add(self, step:int, feat):
-#         for k in list(self.memory):
-#             if step - k > self.max_steps:
-#                 self.memory.pop(k)
-#         self.memory[step] = feat
-#         # print('memory contains:', self.memory.keys())
-
-#     def get(self, step:int):
-#         if step in self.memory:
-#             return self.memory[step]
-#         else:
-#             print('step: ', step, 'memory contains: ', self.memory.keys())
-#             raise KeyError(step)
-class FeatureStore(torch.nn.Module):
-    max_steps: int
-    # memory: Dict[int, torch.Tensor]
-    def __init__(self, 
-            max_steps:int,
-            n_feature:int,
-            ):
-        super().__init__()
-        self.max_steps = 2*max_steps
-        self.n_feature = n_feature
-        self.memory = torch.zeros(self.max_steps, self.n_feature)
-        self.last_step = 0
-
-    def reset(self):
-        # print('store reset')
-        self.memory.zero_()
-
-    def replace(self, other:"FeatureStore"):
-        # self.memory = dict(other.memory)
-        self.memory[:] = other.memory
-        self.last_step = other.last_step
-
-    def add(self, step:int, feat):
-        self.last_step = step
-        self.memory[step%self.max_steps, :] = feat
-        # print('memory contains:', self.memory.keys())
-
-    def get(self, step:int):
-        # if step in self.memory:
-        if step <= self.last_step:
-            return self.memory[step%self.max_steps]
-        else:
-            # print('step: ', step, 'memory contains: ', self.memory.keys())
-            raise KeyError(step)
-        
-
 class Loop(torch.nn.Module):
     n_loops:int
     index:int
@@ -137,8 +70,6 @@ class Loop(torch.nn.Module):
         # would need multiple stages of init to allow otherwise
         n_feature = n_loops * self.rep.n_feature #n_loops * n_context * n_latent
 
-        self.store = FeatureStore(2*latency_correct, self.rep.n_feature)
-
         # for now assuming xform preserves target size
         # self.target_xform = LinQuad()
         # # self.target_xform = Id()
@@ -168,6 +99,8 @@ class Loop(torch.nn.Module):
             torch.empty(n_latent, requires_grad=False))
         self.register_buffer('z_max', 
             torch.empty(n_latent, requires_grad=False))
+        self.register_buffer('feature', 
+            torch.empty(self.rep.n_feature, requires_grad=False))
 
     def reset(self):
         self.model.reset()
@@ -178,7 +111,7 @@ class Loop(torch.nn.Module):
 
     def replace(self, other:"Loop"):
         self.rep.replace(other.rep)
-        self.store.replace(other.store)
+        # self.store.replace(other.store)
 
     def partial_fit(self, t:int, x, z):
         """fit raw feature x to raw target z"""
@@ -206,27 +139,20 @@ class Loop(torch.nn.Module):
     def finalize(self):
         self.model.finalize()
 
-    def feed(self, step:int, z):
+    def feed(self, z):
         """
         use the value `z`
         to store the feature for time `step`
         """
-        offset = 0
-        # while (step+offset) in self.store.memory:
-        while (step+offset) <= self.store.last_step:
-            if self.verbose > 1:
-                print('WARNING: feature already computed for loop', self.index, 'step', step+offset)
-            offset += 1
-
         if self.verbose > 1:
-            print('feed loop', self.index, 'offset', offset, 'step', step)
+            print('feed loop', self.index)
         # TODO: could add logic to allow features which don't support rollback here
         # i.e. if feed returns None, don't add?
-        self.store.add(step, self.rep.feed(z, offset))
+        self.feature[:] = self.rep.feed(z)
 
     @torch.jit.export
-    def get(self, step:int):
+    def get(self):
         """get the feature for time `step`"""
         if self.verbose > 1:
-            print(f'get loop', self.index, 'step', step)
-        return self.store.get(step)
+            print(f'get loop', self.index)
+        return self.feature
