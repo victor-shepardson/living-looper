@@ -1,6 +1,16 @@
 import torch
-from typing import List
+from typing import List, Union
     
+
+# class FeatureModule(torch.nn.Module):
+#     def __init__(self):
+#         super().__init__()
+#     def reset(self):
+#         pass
+#     def feed(self, x, offset:int=0):
+#         return x
+#     def replace(self, other:"FeatureModule"):
+#         pass  
 
 # class Chain(torch.nn.Module):
 #     def __init__(self, layers:List[torch.nn.Module]):
@@ -32,10 +42,11 @@ class Slice(torch.nn.Module):
     def feed(self, x, offset:int=0):
         return x[self.start:self.end]
     def replace(self, other:"Slice"):
-        pass
-    
+        pass  
 
 class Cat2(torch.nn.Module):
+    # a:FeatureModule
+    # b:FeatureModule
     def __init__(self, a:torch.nn.Module, b:torch.nn.Module):
         super().__init__()
         self.a = a
@@ -48,6 +59,8 @@ class Cat2(torch.nn.Module):
     def feed(self, x, offset:int=0):
         return torch.cat((self.a.feed(x, offset), self.b.feed(x, offset)), -1)
     def replace(self, other:"Cat2"):
+        # print(type(self)==type(other), type(other))
+        # print(type(self.b), type(other.b))
         self.a.replace(other.a)
         self.b.replace(other.b)
 
@@ -64,9 +77,16 @@ class Chain2(torch.nn.Module):
     def feed(self, x, offset:int=0):
         return self.b.feed(self.a.feed(x, offset), offset)
     def replace(self, other:"Chain2"):
+        # print(type(self)==type(other), type(self))
         self.a.replace(other.a)
         self.b.replace(other.b)
 
+# sadly can't make this actually work with >2 items...
+# torchscript seems to refine the Module types and then choke on the last b
+# when it isn't a Cat2
+# tried to be more explicit, making second argument of Cat2 optional,
+# and carefully refining the type in Cat2, but torch is not having it
+# adding member type annotations to the Cat2 class also not working...
 def Cat(ms:List[torch.nn.Module]):
     if len(ms)==1:
         return ms[0]
@@ -78,11 +98,15 @@ def Chain(ms:List[torch.nn.Module]):
         return ms[0]
     else:
         return Chain2(ms[0], Chain(ms[1:]))
+    
+# can't make this work with the ability to replace state from another Cat
+# because the other's ModuleList  can't be constant...
 # class Cat(torch.nn.Module):
-#     def __init__(self, ms:List[torch.nn.Module]):
+#     __constants__ = ['ms']
+#     def __init__(self, ms:List[torch.nn.Module], src:"Cat"):
 #         super().__init__()
-#         self.n = len(ms)
 #         self.ms = torch.nn.ModuleList(ms)
+#         self.other_ms = src.ms
 #         # self.ms = torch.nn.ModuleDict({str(k):m for k,m in enumerate(ms)})
 #         self.n_feature = sum(m.n_feature for m in ms)
 #     def reset(self):
@@ -94,11 +118,17 @@ def Chain(ms:List[torch.nn.Module]):
 #             xs.append(m.feed(x, offset))
 #         return torch.cat(xs, -1)
 #     def replace(self, other:"Cat"):
-#         oms:torch.nn.ModuleList = other.ms
-#         for i,m in enumerate(self.ms):
-#             for j,mo in enumerate(other.ms):
-#                 if i==j:
-#                     m.replace(mo)
+        # oms:torch.nn.ModuleList = other.ms
+        # for i in range(len(self.ms)):
+        #     self.ms[i].replace(oms[i])
+        # for m,mo in zip(self.ms, other.ms):
+            # m.replace(mo)
+        # for i,m in enumerate(self.ms):
+        #     for j,mo in enumerate(other.ms):
+        #         if i==j:
+        #             m.replace(mo)
+        # for i,m in enumerate(self.ms):
+        #     m.replace(other.ms[i])
             
 
 class Quadratic(torch.nn.Module):
@@ -183,6 +213,56 @@ class Window(torch.nn.Module):
             r = torch.cat((self.memory[begin:], self.memory[:end]))
 
         return r.reshape(-1)
+    
+
+class MultiWindow(torch.nn.Module):
+    """
+    """
+    record_index:int
+    def __init__(self,
+        n_ctx:List[int],
+        ):
+        super().__init__()
+
+        self.n_input = len(n_ctx)
+        self.record_index = 0
+        self.n_ctx = n_ctx
+        self.n_memory = max(n_ctx)*2
+        self.register_buffer('memory', torch.empty(self.n_memory, self.n_input))
+
+        # read by Loop
+        self.n_feature = sum(n_ctx)
+
+        self.reset()
+
+    def reset(self):
+        self.memory.zero_()
+
+    def replace(self, other:"MultiWindow"):
+        self.memory[:] = other.memory
+        self.record_index = other.record_index
+
+    def feed(self, x, offset:int=0):
+        """feed a vector into loop memory and update pointer
+        Args:
+            x: input vector
+            offset: number of frames in the past to rewrite
+        """
+        idx1 = (self.record_index - offset) % self.n_memory
+        idx2 = (self.record_index - offset + self.n_memory//2) % self.n_memory
+        self.memory[idx1] = self.memory[idx2] = x
+        self.record_index = (self.record_index+1) % self.n_memory
+        return self.get(offset)
+
+    def get(self, offset:int=0):
+        """read out of loop memory"""
+        windows = []
+        for i,n in enumerate(self.n_ctx):
+            begin = (self.record_index - n - offset)%(self.n_memory//2)
+            end = begin + n
+            windows.append(self.memory[begin:end,i])
+
+        return torch.cat(windows)
 
 class RNN(torch.nn.Module):
     """

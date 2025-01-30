@@ -305,10 +305,11 @@ class LivingLooper(nn_tilde.Module):
 
         if self.get_auto()>0:
             ### internal auto triggering : (use z to override i)
+            # this would be better normalized by KLD somehow?
             zd = torch.linalg.vector_norm(z[:2] - self.landmark_z[:2]).item()
             if (
                 z[0].abs().item() > 1
-                and zd > 3
+                and zd > 2
                 and (self.record_length > 48 * 2048//self.block_size or self.needs_reset.any())
                 and torch.rand((1,)).item() > 0.5 ### TEST
                 ):

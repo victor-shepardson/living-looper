@@ -186,6 +186,7 @@ class ILR(torch.nn.Module):
         self.reset()
 
     def reset(self):
+        self.n = 0
         self.w.zero_()
         self.P[:] = torch.eye(self.n_feat)*100
         self.mu_x.zero_()
@@ -193,6 +194,7 @@ class ILR(torch.nn.Module):
 
     @torch.jit.export
     def finalize(self):
+        # print(self.mu_y)
         pass
 
     @torch.jit.export
@@ -207,6 +209,7 @@ class ILR(torch.nn.Module):
         self.mu_x[:] = self.mu_x * n/(n+1) + x/(n+1)
         self.mu_y[:] = self.mu_y * n/(n+1) + y/(n+1)
         self.n += 1
+        # print('y', y[0], 'mu', self.mu_y[0], 'n', self.n)
 
         x = x - self.mu_x
         y = y - self.mu_y
@@ -223,6 +226,7 @@ class ILR(torch.nn.Module):
 
     @torch.jit.export
     def predict(self, t:int, x, temp:float=0.0):
+        # return self.mu_y
         return (x - self.mu_x) @ self.w + self.mu_y
 
 
