@@ -39,6 +39,38 @@ from typing import Union
 #         y = self.m.predict(t, x-self.mu_x, temp=temp) + self.mu_y
 #         return y
 
+class Spherize(torch.nn.Module):
+    def __init__(self, cls:type, n_feature:int, n_target:int):
+        super().__init__()
+        self.m = cls(n_feature, n_target+1)
+
+    # wait this should be unconstrained, i.e. log?
+    # currently it should be possible to get negative magnitudes
+    def mag(self, y):
+        return y.pow(2).sum().sqrt()[None] + 1e-7
+        # return y.pow(2).sum().log().clip(-5, 5)[None]*2
+    
+    @torch.jit.export
+    def reset(self):
+        self.m.reset()
+
+    @torch.jit.export
+    def finalize(self):
+        self.m.finalize()
+
+    @torch.jit.export
+    def partial_fit(self, t:int, x, y):
+        y_ = torch.cat([self.mag(y), y])
+        self.m.partial_fit(t, x, y_)
+
+    @torch.jit.export
+    def predict(self, t:int, x, temp:float=0.5):
+        y_ = self.m.predict(t, x, temp=temp)
+        mag, y = y_.split([1, y_.shape[-1]-1])
+        y = y / self.mag(y) * mag
+        # y = y * (mag - self.mag(y)).exp()
+        return y
+
 # NOTE: would be better to include a's prediction in the feature for b?
 class Residual(torch.nn.Module):
     """wrap two models, with one predicting the residual of the other"""
@@ -59,6 +91,7 @@ class Residual(torch.nn.Module):
 
     @torch.jit.export
     def partial_fit(self, t:int, x, y):
+        self.a.finalize()
         y_ = self.a.predict(t, x)
         self.a.partial_fit(t, x, y)
         self.b.partial_fit(t, x, y-y_)
@@ -71,7 +104,7 @@ class Residual(torch.nn.Module):
     
 class Residual2(torch.nn.Module):
     """wrap two models, with one predicting the residual of the other.
-    this version provides the prediction of the first as a feature to the second.
+    this version provides the prediction of the first as an additional feature to the second.
     """
     def __init__(self, a:torch.nn.Module, cls:torch.nn.Module, n_feat:int, n_target:int, **kw):
         super().__init__()
@@ -90,8 +123,10 @@ class Residual2(torch.nn.Module):
 
     @torch.jit.export
     def partial_fit(self, t:int, x, y):
+        self.a.finalize()
         y_ = self.a.predict(t, x)
         self.a.partial_fit(t, x, y)
+        # print(y.shape, y_.shape)
         self.b.partial_fit(t, torch.cat((x, y_), -1), y-y_)
 
     @torch.jit.export
@@ -99,8 +134,42 @@ class Residual2(torch.nn.Module):
         y_ = self.a.predict(t, x, temp=temp)
         y = y_ + self.b.predict(t, torch.cat((x, y_), -1), temp=temp)
         return y
+    
+class Residual3(torch.nn.Module):
+    """wrap two models, with one predicting the residual of the other.
+    this version provides the prediction of the first as the *only* feature to the second.
+    """
+    def __init__(self, a:torch.nn.Module, cls:torch.nn.Module, n_feat:int, n_target:int, **kw):
+        super().__init__()
+        self.a = a
+        self.b = cls(n_target, n_target, **kw)
+    
+    @torch.jit.export
+    def reset(self):
+        self.a.reset()
+        self.b.reset()
 
+    @torch.jit.export
+    def finalize(self):
+        self.a.finalize()
+        self.b.finalize()
 
+    @torch.jit.export
+    def partial_fit(self, t:int, x, y):
+        # NOTE this may be expensive when the first model has a finalize step
+        self.a.finalize()
+        y_ = self.a.predict(t, x)
+        self.a.partial_fit(t, x, y)
+        # print(y.shape, y_.shape)
+        self.b.partial_fit(t, y_, y-y_)
+
+    @torch.jit.export
+    def predict(self, t:int, x, temp:float=0.5):
+        y_ = self.a.predict(t, x, temp=temp)
+        y = y_ + self.b.predict(t, y_, temp=temp)
+        return y
+
+# idea: predict log(y**2) to enforce nonnegativity
 class Moments(torch.nn.Module):
     """wrap another model to predict y, y**2, (y**3),
     and use these to estimate variance (skew) conditioned on input features.
@@ -131,6 +200,7 @@ class Moments(torch.nn.Module):
         if self.n_moment==2:
             y, y2 = y.chunk(2, -1)
             if temp>0:
+                # E[x^2] - E[x]^2
                 w = (y2 - y**2).clip(0, 1).sqrt()
                 y = y + w*temp*torch.randn_like(y)
         elif self.n_moment==3:
@@ -164,6 +234,120 @@ def randn_skew(loc, scale, alpha):
     u1[u0 < 0] *= -1
     u1 = u1 + loc
     return u1
+
+# idea: online discretization + markov model
+# part 1: online discretization
+# part 2: variable order markov model
+# part 3: nearest neighbor search for inference
+
+# EM-like algorithm for online clustering, with different features and targets
+class EM(torch.nn.Module):
+    def __init__(self, n_feat:int, n_target:int, max_clusters:int=32):
+        super().__init__()
+
+        self.register_buffer('means', torch.zeros(max_clusters, n_feat))
+        self.register_buffer('vars', torch.ones(max_clusters, n_feat))
+        self.register_buffer('y_means', torch.zeros(max_clusters, n_target))
+        self.register_buffer('y_vars', torch.ones(max_clusters, n_target))
+        self.register_buffer('counts', torch.zeros(max_clusters))
+        self.k = 0 # number of clusters
+        self.max_clusters = max_clusters
+        self.minvar = 0.1
+        self.maxvar = 1
+        self.reset()
+
+    def reset(self):
+        self.k = 0
+        self.vars[:] = self.minvar
+        self.y_vars[:] = self.minvar
+
+    @torch.jit.export
+    def finalize(self):
+        pass
+
+    @torch.jit.export
+    def partial_fit(self, t:int, x, y):
+        """
+        Args:
+            t: unused
+            x: Tensor[n_feat]
+            y: Tensor[n_target]
+        """
+        # online discretization
+        # probabilistic; EM without reassignment
+        #   maintain mean and variance for each cluster
+        #   assign to highest likelihood, 
+        #     considering candidate new cluster (with prior variance)
+        #    -> this would always make a second cluster from the second point
+        #     candidate variance has to be higher than actual new cluster,
+        #       otherwise new cluster would always be better
+        #       it would work to update new cluster variance to 1/2, i.e.
+        #       mean of prior 1 and sample 0
+        # ^ unused (e.g., inactive loop) features are a problem here
+        #   if all 0s for example their variance will just shrink to the minimum
+        #   causing one cluster as runaway most plausible...
+
+        # put mean into kth slot
+        if self.k < self.max_clusters:
+            self.means[self.k] = x
+            k_slice = self.k + 1
+        else:
+            k_slice = self.k
+        # compute likelihoods
+        lik = self.loglik(k_slice, x)
+        # select max index
+        i = lik.argmax()
+        # update means, counts, vars, possibly k
+        if i>=self.k:
+            self.k += 1
+        # print('t', t, 'lik\n', lik, 'k', self.k, 'i', i)
+        # print('lik\n', lik)
+        print('i', i.item())
+        self.counts[i] += 1
+        n = self.counts[i]
+        # first update should set mean to data value
+        self.means[i] = (self.means[i] * (n-1) + x)/n
+        # first update should retain some of prior -- since measured var is 0
+        self.vars[i] = ((
+            self.vars[i] * n + (x-self.means[i])**2
+            )/(1+n)).clip(self.minvar, self.maxvar)
+        # self.vars[i] = self.minvar
+
+        self.y_means[i] = (self.y_means[i] * (n-1) + y)/n
+        self.y_vars[i] = ((
+            self.y_vars[i] * n + (y-self.y_means[i])**2
+            )/(1+n)).clip(self.minvar, self.maxvar)
+        
+        # print('fit y', y[:3], self.y_means[i,:3], self.y_vars[i,:3])
+
+    @torch.jit.export
+    def predict(self, t:int, x, temp:float=0.5):#, itemp:float=0.0):
+        if self.k==0:
+            return self.y_means[0]
+        
+        itemp = temp
+        
+        lik = self.loglik(self.k, x)
+        lik = lik - lik.max()
+        # print(lik)
+        lik = lik.exp()
+        # print(lik)
+        if itemp==0:
+            i = lik.argmax()
+        else:
+            i = torch.multinomial(lik.pow(1/itemp), 1).squeeze()
+        y = self.y_means[i] 
+        y = y + temp*torch.randn_like(y)*self.y_vars[i].sqrt()
+        print('i', i)
+        # print('i', i, 'y', y[:3])
+        return y
+
+    def loglik(self, k:int, x):
+        mu = self.means[:k]
+        var = self.vars[:k]
+        # return ((-(mu-x)**2 / (2*var)).exp() * var.pow(-0.5)).sum(1)
+        return (-(mu-x)**2 / (2*var) - 0.5 * var.log()).sum(1)
+
 
 
 class ILR(torch.nn.Module):
@@ -234,7 +418,7 @@ class IPLS(torch.nn.Module):
     """
     Incremental Partial Least Squares
 
-    Following the NIPALS algorithm as described by Abdi 
+    Following the NI-PALS algorithm as described by Abdi 
     (https://onlinelibrary.wiley.com/doi/abs/10.1002/wics.51), 
     and extending the CIPLS algorithm from Jordao et al 
     (https://ieeexplore.ieee.org/document/9423374/)
@@ -315,13 +499,13 @@ class IPLS(torch.nn.Module):
         # burn-in steps: update only means, W, t norm
         # TODO: does this harm estimation of b?
         if self.n <= self.burn_in:
-            tss = self.t_sq_sum
+            # tss = self.t_sq_sum
 
             self.Wz[:] = self.Wz + x*self.u[:,None]
             tz = (self.Wz @ x) / (self.Wz.pow(2).sum(1).sqrt()+1e-7)
             self.t_sq_sum[:] = self.t_sq_sum + tz*tz
         else:
-
+            # loop over target dimensions
             for i in range(self.u.shape[0]):
                 tss = self.t_sq_sum[i]
 

@@ -3,7 +3,7 @@ import sympy
 import torch
 from torch.nn import ModuleList
 
-from model import ILR, IPLS, GDKR, Moments, Residual2
+from model import ILR, IPLS, GDKR, Moments, Residual2, Residual3, EM, Spherize
 from representation import Window, RNN, DividedQuadratic, Cat, Chain, Slice, MultiWindow
 from transform import LinQuad, Tanh, Id
 
@@ -31,26 +31,22 @@ class Loop(torch.nn.Module):
 
         # self.rep = RNN(n_latent, 1024, 256)
 
+        # self.rep = Window(n_latent, 1)
         # self.rep = Window(n_latent, n_context)
 
         # self.rep = Cat([
         #     Chain([Slice(0,3), Window(3, n_context)]),
         #     Chain([Slice(3,n_latent), Window(n_latent-3, 3)]),
         # ])
-        min_context = 3
+
+        min_context = 2
         primes = list(sympy.sieve.primerange(min_context,n_context))
-        # self.rep = Cat([
-        #     Chain([Slice(i,i+1), Window(1, primes[max(0,len(primes)-1-i)])])
-        #     for i in range(n_latent)
-        # ])
-        # self.rep = MultiWindow([
-        #     primes[max(0,len(primes)-1-i)]
-        #     for i in range(n_latent)
-        #     ])
-        self.rep = MultiWindow([
+        win_lens = [
             primes[int(t.item())] 
-            for t in torch.linspace(0, len(primes)-1, n_latent).long()
-            ])
+            for t in torch.linspace(len(primes)-1, 0, n_latent).long()
+            ]
+        self.rep = MultiWindow(win_lens)
+        print(win_lens)
 
         # self.rep = Cat(ModuleList((Quadratic(self.rep), self.rep)))
         # self.rep = Cat(ModuleList((
@@ -78,21 +74,45 @@ class Loop(torch.nn.Module):
         # # self.model = Moments(GDKR, n_feature, n_latent, n_moment=3)
         # # self.model = Moments(GDKRR, n_feature, n_latent, n_moment=3)
 
-        # # self.target_xform = Id()
-        self.target_xform = LinQuad(thresh=3)
+        self.target_xform = Id()
+        # self.target_xform = LinQuad(thresh=3)
         self.feat_xform = Id()
-        # # self.model = ILR(n_feature, n_latent)
-        self.model = Moments(ILR,
-            n_feat=n_feature, n_target=n_latent, n_moment=2)
+        # self.model = ILR(n_feature, n_latent)
+        # self.model = Spherize(ILR, n_feature, n_latent)
+        # self.model = Moments(ILR,
+            # n_feat=n_feature, n_target=n_latent, n_moment=2)
+        # self.model = Spherize(
+            # lambda f,t: Moments(ILR,f,t,n_moment=2),
+            # n_feature, n_latent)
+        # self.model = EM(n_feature, n_latent)
+        # self.model = Spherize(EM, n_feature, n_latent)
+
+        # self.model = Spherize(lambda f,t: Residual3(
+            # ILR(f,t), EM, f,t), n_feature, n_latent)
+        # self.model = Residual3(
+            # ILR(n_feature, n_latent), EM, n_feature, n_latent)
+        # self.model = Residual2(
+            # ILR(n_feature, n_latent), EM, n_feature, n_latent)
+        # self.model = Residual2(
+            # EM(n_feature, n_latent), ILR, n_feature, n_latent)
         
         # self.target_xform = LinQuad(thresh=3)
         # self.feat_xform = Id()
-        # n_latent_ipls = 32
-        # # n_latent_ipls = n_latent
-        # # self.model = IPLS(
-        # #     n_feat=n_feature, n_target=n_latent, n_latent=n_latent_ipls)
+        n_latent_ipls = 32
+        # n_latent_ipls = n_latent*4
+        # self.model = IPLS(
+        #     n_feat=n_feature, n_target=n_latent, n_latent=n_latent_ipls)
+        self.model = Spherize(lambda f,t: IPLS(
+            f,t, n_latent=n_latent_ipls), n_feature, n_latent)
         # self.model = Moments(IPLS,
             # n_feat=n_feature, n_target=n_latent, n_moment=2, n_latent=n_latent_ipls)
+
+        # self.model = Spherize(lambda f,t: Residual3(
+        #     IPLS(f,t, n_latent=n_latent_ipls), EM, f,t), n_feature, n_latent)
+        # self.model = Spherize(lambda f,t: Residual2(
+            # IPLS(f,t, n_latent=n_latent_ipls), EM, f,t), n_feature, n_latent)
+        # self.model = Spherize(lambda f,t: Residual2(
+            # EM(f,t), IPLS, f,t, n_latent=n_latent_ipls), n_feature, n_latent)
 
         self.register_buffer('limit_margin', limit_margin)
         self.register_buffer('z_min', 
@@ -151,8 +171,7 @@ class Loop(torch.nn.Module):
         self.feature[:] = self.rep.feed(z)
 
     @torch.jit.export
-    def get(self):
-        """get the feature for time `step`"""
+    def get_feature(self):
         if self.verbose > 1:
             print(f'get loop', self.index)
         return self.feature

@@ -149,6 +149,15 @@ class LivingLooper(nn_tilde.Module):
         
         self.reset()
 
+        self.encode_temp = False
+        try:
+            self.encode(torch.zeros(1,1,self.block_size), temp=0)
+            self.encode_temp = True
+        except Exception:
+            pass
+            # raise
+        print(f'{self.encode_temp=}')
+
         ## nn~ methods
         with torch.no_grad():
             self.register_method(
@@ -372,25 +381,28 @@ class LivingLooper(nn_tilde.Module):
 
         self.zs[:,0] = z
 
-        # fit active loops, then predict other loops
+        feat = self.get_feature()
+
+        # fit active loops, then predict other loops, then feed
         for l,loop in enumerate(self.loops):
         # for l,loop in enumerate(self.loops[1:],1):
             # NOTE: slicing self.loops is BUGGED here in torchscript?
             # print(l, id(loop), loop.index)
-            if l>0 and loop_index==l:
-                if self.verbose>1:
-                    print(f'--fitting loop {l}--')
-                feat = self.get_feature(l)
-                loop.partial_fit(self.step, feat, z)
-                # in this case, feed happened above
-                self.zs[:,l] = z
-
-        for l,loop in enumerate(self.loops):
-            if l>0 and loop_index!=l:
-                if self.verbose>1:
-                    print(f'--predicting loop {l}--')
-                feat = self.get_feature(l)
-                self.zs[:,l] = loop.predict(self.step, feat)
+            if l>0:
+                if loop_index==l:
+                    if self.verbose>1:
+                        print(f'--fitting loop {l}--')
+                    # feat = self.get_feature(l)
+                    loop.partial_fit(self.step, feat, z)
+                    # in this case, feed happened above
+                    self.zs[:,l] = z
+                else:
+        # for l,loop in enumerate(self.loops):
+            # if l>0 and loop_index!=l:
+                    if self.verbose>1:
+                        print(f'--predicting loop {l}--')
+                    # feat = self.get_feature(l)
+                    self.zs[:,l] = loop.predict(self.step, feat)
 
         for l,loop in enumerate(self.loops):
             loop.feed(self.zs[0,l])
@@ -428,14 +440,14 @@ class LivingLooper(nn_tilde.Module):
         #     (torch.arange(0,self.block_size)/128*2*np.pi).sin()/3 
         # ))[:,None]
 
-    def get_feature(self, i:int):
-        """
-        Args:
-            i: zero indexed target loop number
-            delay: number of frames in the past
-        """
-        return torch.cat([loop.get() for loop in self.loops[1:]
-        ])
+    def get_feature(self):#, i:int):
+        # """
+        # Args:
+        #     i: zero indexed target loop number
+        # """
+        return torch.cat([loop.get_feature() for loop in self.loops[1:]])
+        # f = torch.cat([loop.get_feature() for loop in self.loops])
+        # return f[f.shape[0]//5:]
 
     def reset_loop(self, i:int):
         """
@@ -491,10 +503,14 @@ class LivingLooper(nn_tilde.Module):
         """
         x = x + torch.randn_like(x)*1e-5
         # TODO -- use temp when available
-        z = self.model.encode(x)
-        # z = self.model.encode(x, temp=0.0)
+        if self.encode_temp:
+            z = self.model.encode(x, temp=0.0)
+        else:
+            z = self.model.encode(x)
         z = z*self.latent_signs
-        return z.clip(-10, 10)
+        # print(z)
+        # return z.clip(-10, 10)
+        return z.clip(-100, 100)
 
     def decode(self, z):
         """
