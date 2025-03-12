@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "livinglooper"
-version = "0.2.2b0"
+version = "0.1.0b0"
 description = "The Living Looper is a software musical instrument using neural synthesis."
 authors = ["Victor Shepardson <victor.shepardson@gmail.com>"]
 license = "MIT"
