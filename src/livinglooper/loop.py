@@ -3,9 +3,9 @@ import sympy
 import torch
 from torch.nn import ModuleList
 
-from model import ILR, IPLS, GDKR, Moments, Residual2, Residual3, EM, Spherize
-from representation import Window, RNN, DividedQuadratic, Cat, Chain, Slice, MultiWindow
-from transform import LinQuad, Tanh, Id
+from .model import ILR, IPLS, GDKR, Moments, Residual2, Residual3, EM, Spherize
+from .representation import Window, RNN, DividedQuadratic, Cat, Chain, Slice, MultiWindow
+from .transform import LinQuad, Tanh, Id
 
 class Loop(torch.nn.Module):
     n_loops:int
@@ -17,7 +17,6 @@ class Loop(torch.nn.Module):
             n_loops:int,
             n_context:int, # time dimension of model feature
             n_latent:int,
-            latency_correct:int,
             limit_margin:torch.Tensor,
             verbose:int=0
         ):
@@ -124,14 +123,12 @@ class Loop(torch.nn.Module):
 
     def reset(self):
         self.model.reset()
-        # self.store.reset() # this only gets reset by LivingLooper.reset
         self.rep.reset() # should this get reset?
         self.z_min.fill_(torch.inf)
         self.z_max.fill_(-torch.inf)
 
     def replace(self, other:"Loop"):
         self.rep.replace(other.rep)
-        # self.store.replace(other.store)
 
     def partial_fit(self, t:int, x, z):
         """fit raw feature x to raw target z"""
@@ -166,8 +163,6 @@ class Loop(torch.nn.Module):
         """
         if self.verbose > 1:
             print('feed loop', self.index)
-        # TODO: could add logic to allow features which don't support rollback here
-        # i.e. if feed returns None, don't add?
         self.feature[:] = self.rep.feed(z)
 
     @torch.jit.export

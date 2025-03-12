@@ -1,4 +1,5 @@
 from typing import Dict, List, Optional, Union
+import logging
 
 import torch
 import torch.nn as nn
@@ -7,13 +8,12 @@ from torch import Tensor
 import numpy as np
 
 from fire import Fire
-import logging
 from termcolor import colored
 from tqdm import tqdm
 
 import nn_tilde
 
-from loop import Loop
+from .loop import Loop
 
 
 # each loop has:
@@ -27,15 +27,9 @@ from loop import Loop
     #   partial_fit: [features], target -> ()
     #   finalize: () -> ()
     #   predict: [features] -> target
-    # store: (stores features and indexes them by global step)
 
 # a rep can be composed from other reps
 # e.g. Tanh . Window
-
-# latency correction:
-    # fit with a delay on other loops;
-    #   i.e. call get with skip=latency correct for other loops
-    # roll out predictions after calling finalize
 
 # LivingLooper
     # z = model.encode(x)
@@ -61,15 +55,12 @@ class LivingLooper(nn_tilde.Module):
     step:int
     record_length:int
 
-    latency_correct:int
-
     verbose:int
 
     def __init__(self, 
             model:torch.jit.ScriptModule, 
             n_loops:int, 
             n_context:int, # time dimension of model feature
-            latency_correct:int, # in latent frames
             sr:int, # sample rate
             limit_margin:List[float], # limit latents relative to recorded min/max
             latent_signs:List[int], # flip latents
@@ -83,9 +74,6 @@ class LivingLooper(nn_tilde.Module):
 
         self.n_loops = n_loops
         self.verbose = verbose
-
-        # self.min_loop = 2
-        self.latency_correct = latency_correct
 
         # support standard exported nn~ models:
         # unwrap neutone
@@ -129,7 +117,7 @@ class LivingLooper(nn_tilde.Module):
         # create Loops
         # loop 0 is the input feature extractor
         self.loops = nn.ModuleList(Loop(
-            i, n_loops, n_context, self.n_latent, latency_correct, 
+            i, n_loops, n_context, self.n_latent, 
             limit_margin_t, verbose,
         ) for i in range(n_loops+1))
 
@@ -487,12 +475,6 @@ class LivingLooper(nn_tilde.Module):
         for j,loop in enumerate(self.loops): 
             if i==j:
                 loop.finalize()
-                # # rollout predictions to make up latency
-                # for dt in range(self.latency_correct+1,1,-1):
-                #     # print(f'rollout {dt}')
-                #     feat = self.get_feature(i,dt)
-                #     z = loop.predict(self.step-dt, feat)
-                #     loop.feed(self.step-dt+1, z)
                     
         self.mask[1,i] = 1.
         self.needs_end[i] = False
@@ -531,8 +513,6 @@ def main(
     context=64,
     # number of loops
     loops=4,
-    # latency correction, latent frames
-    latency_correct=2,
     # latent-limiter feature
     # last value is repeated for remaining latents
     # limit_margin=[0.1, 0.5, 1],
@@ -571,7 +551,6 @@ def main(
         model, 
         loops,
         context, 
-        latency_correct,
         sr,
         limit_margin,
         latent_signs,
