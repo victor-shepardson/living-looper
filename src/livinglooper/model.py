@@ -542,6 +542,10 @@ class IPLS(torch.nn.Module):
                 b = self.bz[i] / self.t_sq_sum[i].sqrt()
 
                 self.P[i] = self.P[i] + x*t
+                # print('i', i)
+                # print('x', x.abs().mean())
+                # print('t', t)
+                # print('P', self.P.abs().mean())
 
                 x = x - t*self.P[i]
                 y = y - b*t*C_i
@@ -555,9 +559,9 @@ class IPLS(torch.nn.Module):
             b = self.bz / self.t_sq_sum.sqrt()
             # print(self.P)
             # self.H[:] = torch.linalg.pinv(self.P) * b @ C
-            self.H[:] = torch.linalg.lstsq(self.P, b[:,None]*C).solution
-
-            # print(self.H)
+            S = torch.linalg.lstsq(self.P, b[:,None]*C, driver='gelsd')
+            # print(S)
+            self.H[:] = S.solution
         # print(self.mu_y.chunk(3, -1))
 
     @torch.jit.export

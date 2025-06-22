@@ -129,6 +129,7 @@ class Loop(torch.nn.Module):
 
     def replace(self, other:"Loop"):
         self.rep.replace(other.rep)
+        self.feature[:] = other.feature
 
     def partial_fit(self, t:int, x, z):
         """fit raw feature x to raw target z"""
@@ -136,7 +137,7 @@ class Loop(torch.nn.Module):
             print('fit loop', self.index, 'step', t)
         self.z_min[:] = torch.minimum(self.z_min, z)
         self.z_max[:] = torch.maximum(self.z_max, z)
-        # print('min', self.z_min, 'max', self.z_max)
+        # print('index', self.index, 'min', self.z_min[0].item(), 'max', self.z_max[0].item())
         x = self.feat_xform(x)
         z = self.target_xform(z)
         self.model.partial_fit(t, x, z)
@@ -163,10 +164,11 @@ class Loop(torch.nn.Module):
         """
         if self.verbose > 1:
             print('feed loop', self.index)
+            print('z[0]=',z[0].item())
         self.feature[:] = self.rep.feed(z)
 
     @torch.jit.export
     def get_feature(self):
-        if self.verbose > 1:
-            print(f'get loop', self.index)
+        # if self.verbose > 1:
+            # print(f'get loop', self.index)
         return self.feature

@@ -57,6 +57,8 @@ class LivingLooper(nn_tilde.Module):
 
     verbose:int
 
+    encode_temp:bool
+
     def __init__(self, 
             model:torch.jit.ScriptModule, 
             n_loops:int, 
@@ -137,14 +139,9 @@ class LivingLooper(nn_tilde.Module):
         
         self.reset()
 
-        self.encode_temp = False
-        try:
-            self.encode(torch.zeros(1,1,self.block_size), temp=0)
-            self.encode_temp = True
-        except Exception:
-            pass
-            # raise
-        print(f'{self.encode_temp=}')
+        block_size = model.encoder.encoder.downsample_factor
+        if model.pqmf is not None: 
+            block_size = block_size * model.pqmf.n_band
 
         ## nn~ methods
         with torch.no_grad():
@@ -166,7 +163,7 @@ class LivingLooper(nn_tilde.Module):
                 out_ratio=1,
                 input_labels=['(signal) input'],
                 output_labels=['(signal) loop channel %d'%d for d in range(1, self.n_loops+1)], 
-                test_buffer_size=2048,##TODO
+                test_buffer_size=block_size,
             )
 
             self.register_method(
@@ -179,7 +176,7 @@ class LivingLooper(nn_tilde.Module):
                 output_labels=
                     ['(signal) loop channel %d'%d for d in range(1, self.n_loops+1)]
                     + ['(signal) latents channel %d'%d for d in range(1, self.n_loops+1)],
-                test_buffer_size=2048##TODO
+                test_buffer_size=block_size
             )
 
     # loop_index has to be a tuple for nn~ reasons
@@ -290,12 +287,12 @@ class LivingLooper(nn_tilde.Module):
 
         # always encode for cache, even if result is not used
         if self.verbose > 1:
-            print(f'encoding...')
+            print(f'encoding')
         with torch.no_grad():
             z = self.encode(x).squeeze()
             # print('encoded', z.shape)
-        if self.verbose > 1:
-            print(f'done')
+        # if self.verbose > 1:
+        #     print(f'done')
             # print(z)
 
         if self.get_auto()>0:
@@ -379,16 +376,15 @@ class LivingLooper(nn_tilde.Module):
             if l>0:
                 if loop_index==l:
                     if self.verbose>1:
-                        print(f'--fitting loop {l}--')
+                        print(f'\tfitting loop {l}')
                     # feat = self.get_feature(l)
                     loop.partial_fit(self.step, feat, z)
-                    # in this case, feed happened above
                     self.zs[:,l] = z
                 else:
         # for l,loop in enumerate(self.loops):
             # if l>0 and loop_index!=l:
                     if self.verbose>1:
-                        print(f'--predicting loop {l}--')
+                        print(f'\tpredicting loop {l}')
                     # feat = self.get_feature(l)
                     self.zs[:,l] = loop.predict(self.step, feat)
 
@@ -403,7 +399,7 @@ class LivingLooper(nn_tilde.Module):
         # self.mask[:,1:] = 0
 
         if self.verbose>1:
-            print(f'--decoding...--')
+            print(f'decoding')
         with torch.no_grad():
             y = self.decode(self.zs.permute(1,2,0)[1:]) # loops, channels (1), time
         if self.verbose>1:
@@ -433,7 +429,17 @@ class LivingLooper(nn_tilde.Module):
         # Args:
         #     i: zero indexed target loop number
         # """
-        return torch.cat([loop.get_feature() for loop in self.loops[1:]])
+        # f = torch.cat((
+        #     self.loops[1].get_feature(),
+        #     self.loops[2].get_feature(),
+        #     self.loops[3].get_feature(),
+        #     self.loops[4].get_feature(),
+        # ))
+        f = torch.cat([loop.get_feature() for loop in self.loops[1:]])
+        # k = f.shape[0]
+        # print(f[::k//4])
+        # print([x.mean().item() for x in f.chunk(4)])
+        return f
         # f = torch.cat([loop.get_feature() for loop in self.loops])
         # return f[f.shape[0]//5:]
 
@@ -446,10 +452,10 @@ class LivingLooper(nn_tilde.Module):
         for j,loop in enumerate(self.loops): 
             if i==j:
                 if self.verbose>0:
-                    print(f'resetting {i}...')
+                    print(f'resetting {i}')
                 loop.reset()
-                if self.verbose>0:
-                    print(f'done')
+                # if self.verbose>0:
+                    # print(f'done')
         self.mask[1,i] = 0.
         self.needs_reset[i] = False
 
@@ -483,16 +489,16 @@ class LivingLooper(nn_tilde.Module):
         """
         feature encoder
         """
-        x = x + torch.randn_like(x)*1e-5
+        # x = x + torch.randn_like(x)*1e-5
+        z = self.model.encode(x)
         # TODO -- use temp when available
-        if self.encode_temp:
-            z = self.model.encode(x, temp=0.0)
-        else:
-            z = self.model.encode(x)
+        # z = self.model.encode(x, temp=0.0)
+
         z = z*self.latent_signs
         # print(z)
         # return z.clip(-10, 10)
-        return z.clip(-100, 100)
+        # return z.clip(-100, 100)
+        return z.clip(-1e6, 1e6)
 
     def decode(self, z):
         """
@@ -561,6 +567,7 @@ def main(
     # smoke test
     def feed(i):
         x = (torch.rand(1, 1, looper.block_size)-0.5)*0.01
+        # x = torch.zeros(1, 1, looper.block_size)
         # x = (torch.rand(1, 1, 2**11)-0.5)*0.1
         looper.set_loop_index(i)
         looper(x)
